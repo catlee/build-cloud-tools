@@ -101,48 +101,21 @@ def aws_get_reservations(regions, secrets):
     return retval
 
 
-def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryrun):
-    "resume up to `start_count` stopped instances of the given type in the given regions"
-    instance_config = json.load(open("configs/%s" % moz_instance_type))
-    max_running = instance_config.get('max_running')
-    # Do a single request to get all instances here
-    # We end up needing to look at most of them to figure out which instances
-    # we can start
-    all_instances = aws_get_all_instances(regions, secrets)
-    # We'll filter by these tags
-    tags = {'moz-state': 'ready', 'moz-type': moz_instance_type}
-    if max_running is not None:
-        running = len(aws_filter_instances(all_instances, state='running', tags=tags))
-        if running + start_count > max_running:
-            start_count = max_running - running
-            if start_count <= 0:
-                log.info("max_running limit hit (%s - %i)", moz_instance_type, max_running)
-                return 0
+def aws_filter_reservations(reservations, running_instances, stopped_instances):
+    """
+    Filters reservations by reducing the count for reservations by the number
+    of running instances of the appropriate type. Removes entries for
+    reservations that are fully used, or for which we have no stopped
+    instances.
 
-    # Get our list of stopped instances, sorted by launch_time
-    stopped_instances = aws_filter_instances(all_instances, state='stopped', tags=tags)
-    stopped_instances.sort(key=lambda i: i.launch_time)
-    stopped_instances.reverse()
-    log.debug("stopped_instances: %s", stopped_instances)
-
-    # Get our current reservations
-    reservations = aws_get_reservations(regions, secrets)
-    # XXX: For debugging - add a fake reservation we can't use to make sure it
-    # gets filtered out later
-    reservations['us-west-1b', 'm1.large'] = 2
-    reservations['us-west-1a', 'c1.xlarge'] = 500
-    log.debug("current reservations: %s", reservations)
-
-    # Get our currently running instances
-    running = aws_filter_instances(all_instances, state='running')
+    Modifies reservations in place
+    """
     # Subtract running instances from our reservations
-    for i in running:
-        az = i.placement
-        ec2_instance_type = i.instance_type
-        if (az, ec2_instance_type) in reservations:
-            reservations[az, ec2_instance_type] -= 1
-
+    for i in running_instances:
+        if (i.placement, i.instance_type) in reservations:
+            reservations[i.placement, i.instance_type] -= 1
     log.debug("available reservations: %s", reservations)
+
     # Remove reservations that are used up
     for k, count in reservations.items():
         if count <= 0:
@@ -158,9 +131,45 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryru
     for k in impossible_kinds:
         del reservations[k]
 
+
+def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryrun):
+    "resume up to `start_count` stopped instances of the given type in the given regions"
+    # Fetch all our instance information
+    all_instances = aws_get_all_instances(regions, secrets)
+    # We'll filter by these tags in general
+    tags = {'moz-state': 'ready', 'moz-type': moz_instance_type}
+
+    # If our instance config specifies a maximum number of running instances,
+    # apply that now. This may mean that we reduce start_count, or return early
+    # if we're already running >= max_running
+    instance_config = json.load(open("configs/%s" % moz_instance_type))
+    max_running = instance_config.get('max_running')
+    if max_running is not None:
+        running = len(aws_filter_instances(all_instances, state='running', tags=tags))
+        if running + start_count > max_running:
+            start_count = max_running - running
+            if start_count <= 0:
+                log.info("max_running limit hit (%s - %i)", moz_instance_type, max_running)
+                return 0
+
+    # Get our list of stopped instances, sorted by launch_time
+    stopped_instances = list(reversed(sorted(
+        aws_filter_instances(all_instances, state='stopped', tags=tags),
+        key=lambda i: i.launch_time)))
+    log.debug("stopped_instances: %s", stopped_instances)
+
+    # Get our current reservations
+    reservations = aws_get_reservations(regions, secrets)
+    log.debug("current reservations: %s", reservations)
+
+    # Get our currently running instances
+    running_instances = aws_filter_instances(all_instances, state='running')
+
+    # Filter the reservations
+    aws_filter_reservations(reservations, running_instances, stopped_instances)
     log.debug("filtered reservations: %s", reservations)
 
-    # List of (instance,is_reserved) tuples
+    # List of (instance, is_reserved) tuples
     to_start = []
 
     # While we still have reservations, start instances that can use those
@@ -175,7 +184,7 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryru
         if reservations[k] <= 0:
             del reservations[k]
 
-    # Add the rest
+    # Add the rest of the stopped instances
     to_start.extend((i, False) for i in stopped_instances)
 
     # Limit ourselves to start only start_count instances
@@ -184,7 +193,6 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryru
 
     log.debug("to_start: %s", to_start)
 
-    started = 0
     for i, is_reserved in to_start:
         r = "reserved instance" if is_reserved else "instance"
         if not dryrun:
@@ -192,10 +200,8 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryru
             i.start()
         else:
             log.info("%s - %s - would start %s", i.placement, i.tags['Name'], r)
-        started += 1
 
-    assert started == len(to_start)
-    return started
+    return len(to_start)
 
 
 def aws_watch_pending(db, regions, secrets, key_name, builder_map, dryrun):
@@ -259,9 +265,6 @@ if __name__ == '__main__':
     config = json.load(open(options.config))
     secrets = json.load(open(options.secrets))
 
-    print aws_resume_instances('bld-linux64', 5, options.regions, secrets, dryrun=True)
-
-    raise SystemExit()
     aws_watch_pending(
         config['db'],
         options.regions,
