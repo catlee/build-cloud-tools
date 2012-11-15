@@ -127,9 +127,10 @@ def aws_filter_reservations(reservations, running_instances, stopped_instances):
     stopped_kinds = set((i.placement, i.instance_type) for i in stopped_instances)
     reserved_kinds = set(reservations.keys())
     impossible_kinds = reserved_kinds - stopped_kinds
-    log.debug("impossible to use reservations for %s; removing", impossible_kinds)
-    for k in impossible_kinds:
-        del reservations[k]
+    if impossible_kinds:
+        log.debug("impossible to use reservations for %s; removing", impossible_kinds)
+        for k in impossible_kinds:
+            del reservations[k]
 
 
 def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryrun):
