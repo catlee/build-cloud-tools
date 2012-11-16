@@ -101,12 +101,11 @@ def aws_get_reservations(regions, secrets):
     return retval
 
 
-def aws_filter_reservations(reservations, running_instances, stopped_instances):
+def aws_filter_reservations(reservations, running_instances):
     """
     Filters reservations by reducing the count for reservations by the number
     of running instances of the appropriate type. Removes entries for
-    reservations that are fully used, or for which we have no stopped
-    instances.
+    reservations that are fully used.
 
     Modifies reservations in place
     """
@@ -120,16 +119,6 @@ def aws_filter_reservations(reservations, running_instances, stopped_instances):
     for k, count in reservations.items():
         if count <= 0:
             log.debug("all reservations for %s are used; removing", k)
-            del reservations[k]
-
-    # Remove reservations that we can't use right now (no stopped instances in
-    # the right zones or of the right type)
-    stopped_kinds = set((i.placement, i.instance_type) for i in stopped_instances)
-    reserved_kinds = set(reservations.keys())
-    impossible_kinds = reserved_kinds - stopped_kinds
-    if impossible_kinds:
-        log.debug("impossible to use reservations for %s; removing", impossible_kinds)
-        for k in impossible_kinds:
             del reservations[k]
 
 
@@ -176,7 +165,7 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, regio
     running_instances = aws_filter_instances(all_instances, state='running')
 
     # Filter the reservations
-    aws_filter_reservations(reservations, running_instances, stopped_instances)
+    aws_filter_reservations(reservations, running_instances)
     log.debug("filtered reservations: %s", reservations)
 
     # List of (instance, is_reserved) tuples
