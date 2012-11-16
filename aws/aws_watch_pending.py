@@ -133,8 +133,8 @@ def aws_filter_reservations(reservations, running_instances, stopped_instances):
             del reservations[k]
 
 
-def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryrun):
-    "resume up to `start_count` stopped instances of the given type in the given regions"
+def aws_resume_instances(moz_instance_type, start_count, regions, secrets, region_priorities, dryrun):
+    "Resume up to `start_count` stopped instances of the given type in the given regions"
     # Fetch all our instance information
     all_instances = aws_get_all_instances(regions, secrets)
     # We'll filter by these tags in general
@@ -153,10 +153,19 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryru
                 log.info("max_running limit hit (%s - %i)", moz_instance_type, max_running)
                 return 0
 
-    # Get our list of stopped instances, sorted by launch_time
+    # Get our list of stopped instances, sorted by region priority, then launch_time
+    # Higher region priorities mean we'll prefer to start those instances first
+    def _instance_sort_key(i):
+        # Region is (usually?) the placement with the last character dropped
+        r = i.placement[:-1]
+        if r not in region_priorities:
+            log.warning("No region priority for %s; az=%s; region_priorities=%s",
+                        r, i.placement, region_priorities)
+        p = region_priorities.get(r, 0)
+        return (p, i.launch_time)
     stopped_instances = list(reversed(sorted(
         aws_filter_instances(all_instances, state='stopped', tags=tags),
-        key=lambda i: i.launch_time)))
+        key=_instance_sort_key)))
     log.debug("stopped_instances: %s", stopped_instances)
 
     # Get our current reservations
@@ -205,7 +214,7 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets, dryru
     return len(to_start)
 
 
-def aws_watch_pending(db, regions, secrets, key_name, builder_map, dryrun):
+def aws_watch_pending(db, regions, secrets, key_name, builder_map, region_priorities, dryrun):
     # First find pending jobs in the db
     pending = find_pending(db)
 
@@ -226,7 +235,7 @@ def aws_watch_pending(db, regions, secrets, key_name, builder_map, dryrun):
         log.debug("need %i %s", count, instance_type)
 
         # Check for stopped instances in the given regions and start them if there are any
-        started = aws_resume_instances(instance_type, count, regions, secrets, dryrun)
+        started = aws_resume_instances(instance_type, count, regions, secrets, region_priorities, dryrun)
         count -= started
         log.info("%s - started %i instances; need %i", instance_type, started, count)
 
@@ -272,5 +281,6 @@ if __name__ == '__main__':
         secrets,
         options.key_name,
         config['buildermap'],
+        config['region_priorities'],
         options.dryrun,
     )
