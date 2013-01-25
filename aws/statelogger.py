@@ -4,6 +4,8 @@ module for logging state
 import os
 from datetime import datetime
 import json
+import logging
+log = logging.getLogger()
 
 import pytz
 
@@ -41,13 +43,18 @@ class StateLogger(object):
         values = json.dumps(kwargs, separators=(',:'))
         for k, v in kwargs.items():
             self.values[k] = v
-        line = "{now} {msg} {values}\n".format(
+        line = "{now} {msg} {values}".format(
             now=now,
             msg=msg,
             values=values,
         )
+	log.info(line)
         with open(self.fn, 'a+') as f:
             f.write(line)
+            f.write("\n")
+
+    def get(self, key, default=None):
+	return self.values.get(key, default)
 
 if __name__ == '__main__':
     s = StateLogger("test.log")
