@@ -30,9 +30,12 @@ def assimilate(ip_addr, config, instance_data, create_ami):
     # Sanity check
     run("date")
 
+    distro = config.get('distro')
     # Set our hostname
     hostname = "{hostname}".format(**instance_data)
     run("hostname %s" % hostname)
+    if distro in ('ubuntu', 'debian'):
+        run("echo %s > /etc/hostname" % hostname)
 
     # Resize the file systems
     # We do this because the AMI image usually has a smaller filesystem than
@@ -42,14 +45,13 @@ def assimilate(ip_addr, config, instance_data, create_ami):
             run('resize2fs {dev}'.format(dev=mapping['instance_dev']))
 
     # Set up /etc/hosts to talk to 'puppet'
-    hosts = ['127.0.0.1 localhost.localdomain localhost',
+    hosts = ['127.0.0.1 localhost.localdomain localhost %s' % hostname,
              '::1 localhost6.localdomain6 localhost6'] + \
             ["%s %s" % (ip, host) for host, ip in
              instance_data['hosts'].iteritems()]
     hosts = StringIO.StringIO("\n".join(hosts) + "\n")
     put(hosts, '/etc/hosts')
 
-    distro = config.get('distro')
     if distro in ('ubuntu', 'debian'):
         put('releng.list', '/etc/apt/sources.list')
         run("apt-get update")
