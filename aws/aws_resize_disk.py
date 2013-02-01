@@ -195,6 +195,8 @@ def aws_resize_disk(i, device, size):
     # Mark instance as ready
     i.add_tag('moz-state', old_state)
     slog.log("reset state", old_state=None)
+    slog.log("old volume", old_volume=None)
+    slog.log("device", device=None)
 
     log.info("Deleting old volume")
     # Delete old volume
@@ -221,7 +223,7 @@ if __name__ == "__main__":
 
     my_placement = aws_get_my_placement()
     my_region = my_placement[:-1]
-    log.info("My region is %s", my_region)
+    log.info("My region is %s", my_placement)
 
     # Load all instances for this region, then filter by our AZ and our type
     conn = aws_connect_to_region(my_region, {})
