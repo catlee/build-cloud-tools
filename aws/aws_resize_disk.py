@@ -48,6 +48,7 @@ def aws_safe_attach_volume(v, allowed_instance_ids, device):
     """
     log.info("Attaching volume %s", v.id)
     my_instance_id = aws_get_my_instanceid()
+    v.update()
     if v.attach_data.instance_id == my_instance_id:
 	log.info("Already attached to me!")
     elif v.attach_data.instance_id is None:
@@ -63,8 +64,10 @@ def aws_safe_attach_volume(v, allowed_instance_ids, device):
 	log.error("Volume is attached to %s - I won't touch it!", v.attach_data.instance_id)
 	return False
 
-    v.update()
-    assert v.attach_data.instance_id == my_instance_id
+    while v.attach_data.instance_id != my_instance_id:
+	log.info("Waiting for %s to attach", v.id)
+	time.sleep(2)
+	v.update()
 
     while not os.path.exists(device):
 	log.info("Waiting for %s to attach", v.id)
@@ -83,12 +86,19 @@ def aws_resize_disk(i, device, size):
 	log.error("%s is not stopped", name)
 	return False
 
-    if device not in i.block_device_mapping:
-	log.error("%s doesn't exist on %s", device, name)
+    if slog.get('device') is None:
+	if device not in i.block_device_mapping:
+	    log.error("%s doesn't exist on %s", device, name)
+	    return False
+	slog.log("old device", device=device)
+	old_block_device = i.block_device_mapping[device]
+	old_volume = conn.get_all_volumes([old_block_device.volume_id])[0]
+    elif slog.get('device') != device:
+	log.error("old device was %s, but we're trying to mount %s", slog.get('device'), device)
 	return False
+    else:
+	old_volume = conn.get_all_volumes([slog.get('old_volume')])[0]
 
-    old_block_device = i.block_device_mapping[device]
-    old_volume = conn.get_all_volumes([old_block_device.volume_id])[0]
     log.info("Old volume id was %s", old_volume.id)
     if slog.get("old_volume") != old_volume.id:
 	slog.log("old volume id", old_volume=old_volume.id)
@@ -226,10 +236,18 @@ if __name__ == "__main__":
 	instances = [i for i in instances if i.tags.get('Name') in args.hosts]
 
     # Go resize ALL the disks
-    for i in instances:
-	if i.state != "stopped":
-	    log.info("Skipping %s; not stopped", i.tags.get('Name'))
-	    continue
-	log.info("Resizing disk on %s (%s)", i.tags.get('Name'), i.id)
-	if not aws_resize_disk(i, args.device, args.size):
-	    break
+    while instances:
+	for i in instances[:]:
+	    i.update()
+	    if i.state != "stopped":
+		log.info("Skipping %s; not stopped", i.tags.get('Name'))
+		continue
+	    log.info("Resizing disk on %s (%s)", i.tags.get('Name'), i.id)
+	    if aws_resize_disk(i, args.device, args.size):
+		instances.remove(i)
+	    else:
+		exit()
+	else:
+	    if instances:
+		log.info("still some instances to re-size; try again later")
+		time.sleep(300)
