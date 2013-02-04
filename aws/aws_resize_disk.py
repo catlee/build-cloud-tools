@@ -217,6 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--device", dest="device", required=True)
     parser.add_argument("-s", "--size", dest="size", type=int, required=True)
     parser.add_argument("-t", "--type", dest="type", required=True)
+    parser.add_argument("--instance-type", dest="instance_type")
 
     args = parser.parse_args()
 
@@ -244,6 +245,10 @@ if __name__ == "__main__":
     # Remove instances that already have the right disk size
     for i in instances[:]:
         name = i.tags.get('Name')
+        # Check that the instance type is ok
+        if args.instance_type is not None and i.get_attribute('instanceType') != args.instance_type:
+            continue
+
         if args.device in i.block_device_mapping:
             block_device = i.block_device_mapping[args.device]
             vol = conn.get_all_volumes([block_device.volume_id])[0]
@@ -258,6 +263,11 @@ if __name__ == "__main__":
             if i.state != "stopped":
                 log.info("Skipping %s; not stopped", i.tags.get('Name'))
                 continue
+
+            if args.instance_type is not None and i.get_attribute('instanceType') != args.instance_type:
+                log.info("Changing instance type on %s (%s) to %s", i.tags.get('Name'), i.id, args.instance_type)
+                i.modify_attribute('instanceType', args.instance_type)
+
             log.info("Resizing disk on %s (%s)", i.tags.get('Name'), i.id)
             if aws_resize_disk(i, args.device, args.size):
                 instances.remove(i)
