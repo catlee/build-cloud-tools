@@ -246,7 +246,8 @@ if __name__ == "__main__":
     for i in instances[:]:
         name = i.tags.get('Name')
         # Check that the instance type is ok
-        if args.instance_type is not None and i.get_attribute('instanceType') != args.instance_type:
+        if args.instance_type is not None and i.instance_type != args.instance_type:
+            log.info("%s(%s) has instance type %s - should be %s", name, i.id, i.instance_type, args.instance_type)
             continue
 
         if args.device in i.block_device_mapping:
