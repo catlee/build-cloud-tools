@@ -192,13 +192,15 @@ def aws_safe_stop_instance(i, impaired_ids, passwords, dryrun=False):
     if last_activity > 300:
         if not dryrun:
             # Hit graceful shutdown on the master
-            log.info("%s - starting graceful shutdown", name)
+            log.debug("%s - starting graceful shutdown", name)
             graceful_shutdown(name, ip, ssh_client)
 
             # Check if we've exited right away
             if get_last_activity(name, ssh_client) == "stopped":
-                log.info("%s - stopping instance", name)
+                log.debug("%s - stopping instance", name)
                 i.stop()
+            else:
+                log.info("%s - not stopping, waiting for graceful shutdown", name)
         else:
             log.info("%s - would have started graceful shutdown", name)
     else:
