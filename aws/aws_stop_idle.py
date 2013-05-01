@@ -4,10 +4,16 @@ Watches running EC2 instances and shuts them down when idle
 """
 import re
 import time
+import calendar
 try:
     import simplejson as json
+    assert json
 except ImportError:
     import json
+
+import random
+import threading
+from Queue import Queue, Empty
 
 import boto.ec2
 from paramiko import SSHClient
@@ -47,10 +53,10 @@ def get_ssh_client(name, ip, passwords):
         try:
             client.connect(hostname=ip, username='cltbld', password=p)
             return client
-        except:
+        except Exception:
             pass
 
-    log.warn("Couldn't log into {name} at {ip} with any known passwords".format(name=name, ip=ip))
+    log.warning("Couldn't log into {name} at {ip} with any known passwords".format(name=name, ip=ip))
     return None
 
 
@@ -62,7 +68,7 @@ def get_last_activity(name, client):
     stdin, stdout, stderr = client.exec_command("cat /proc/uptime")
     uptime = float(stdout.read().split()[0])
 
-    if uptime < 3*60:
+    if uptime < 3 * 60:
         # Assume we're still booting
         log.debug("%s - uptime is %.2f; assuming we're still booting up", name, uptime)
         return "booting"
@@ -108,16 +114,16 @@ def get_last_activity(name, client):
             last_activity = slave_time - t
 
     # If this was over 10 minutes ago
-    if (slave_time - t) > 10*60 and (slave_time - t) > uptime:
-        log.warning("%s - shut down happened %ss ago, but we've been up for %ss - %s", name, slave_time-t, uptime, line.strip())
+    if (slave_time - t) > 10 * 60 and (slave_time - t) > uptime:
+        log.warning("%s - shut down happened %ss ago, but we've been up for %ss - %s", name, slave_time - t, uptime, line.strip())
         # If longer than 30 minutes, try rebooting
-        if (slave_time - t) > 30*60:
+        if (slave_time - t) > 30 * 60:
             log.warning("%s - rebooting", name)
             stdin, stdout, stderr = client.exec_command("sudo reboot")
             stdin.close()
 
     # If there's *no* activity (e.g. no twistd.log files), and we've been up a while, then reboot
-    if last_activity is None and uptime > 15*60:
+    if last_activity is None and uptime > 15 * 60:
         log.warning("%s - no activity; rebooting", name)
         # If longer than 30 minutes, try rebooting
         stdin, stdout, stderr = client.exec_command("sudo reboot")
@@ -156,7 +162,64 @@ def graceful_shutdown(name, ip, client):
     requests.post(url, allow_redirects=False)
 
 
-def aws_stop_idle(secrets, passwords, regions, dryrun=False):
+def aws_safe_stop_instance(i, impaired_ids, passwords, dryrun=False):
+    "Returns True if stopped"
+    name = i.tags['Name']
+    # TODO: Check with slavealloc
+
+    ip = i.private_ip_address
+    ssh_client = get_ssh_client(name, ip, passwords)
+    stopped = False
+    if not ssh_client:
+        if i.id in impaired_ids:
+            launch_time = calendar.timegm(time.strptime(
+                i.launch_time[:19], '%Y-%m-%dT%H:%M:%S'))
+            if time.time() - launch_time > 60 * 10:
+                stopped = True
+                if not dryrun:
+                    log.warning("%s - shut down an instance with impaired status" % name)
+                    i.stop()
+                else:
+                    log.info("%s - would have stopped", name)
+        return stopped
+    last_activity = get_last_activity(name, ssh_client)
+    if last_activity == "stopped":
+        stopped = True
+        if not dryrun:
+            log.info("%s - stopping instance (launched %s)", name, i.launch_time)
+            i.stop()
+        else:
+            log.info("%s - would have stopped", name)
+        return stopped
+
+    if last_activity == "booting":
+        # Wait harder
+        return stopped
+
+    log.debug("%s - last activity %is ago", name, last_activity)
+    # Determine if the machine is idle for more than 10 minutes
+    if last_activity > 300:
+        if not dryrun:
+            # Hit graceful shutdown on the master
+            log.debug("%s - starting graceful shutdown", name)
+            graceful_shutdown(name, ip, ssh_client)
+
+            # Check if we've exited right away
+            if get_last_activity(name, ssh_client) == "stopped":
+                log.debug("%s - stopping instance", name)
+                i.stop()
+                stopped = True
+            else:
+                log.info("%s - not stopping, waiting for graceful shutdown", name)
+        else:
+            log.info("%s - would have started graceful shutdown", name)
+            stopped = True
+    else:
+        log.debug("%s - not stopping", name)
+    return stopped
+
+
+def aws_stop_idle(secrets, passwords, regions, dryrun=False, concurrency=8):
     if not regions:
         # Look at all regions
         log.debug("loading all regions")
@@ -164,11 +227,17 @@ def aws_stop_idle(secrets, passwords, regions, dryrun=False):
 
     min_running_by_type = 0
 
+    all_instances = []
+    impaired_ids = []
+
     for r in regions:
         log.debug("looking at region %s", r)
         conn = boto.ec2.connect_to_region(r, **secrets)
 
         instances = get_buildbot_instances(conn)
+        impaired = conn.get_all_instance_status(
+            filters={'instance-status.status': 'impaired'})
+        impaired_ids.extend(i.id for i in impaired)
         instances_by_type = {}
         for i in instances:
             # TODO: Check if launch_time is too old, and terminate the instance
@@ -183,80 +252,91 @@ def aws_stop_idle(secrets, passwords, regions, dryrun=False):
                 log.debug("%s - keep running (min %i instances of type %s)", i.tags['Name'], min_running_by_type, i.tags['moz-type'])
                 instances.remove(i)
 
-        for i in instances:
-            name = i.tags['Name']
-            # TODO: Check with slavealloc
+        all_instances.extend(instances)
 
-            ip = i.private_ip_address
-            ssh_client = get_ssh_client(name, ip, passwords)
-            if not ssh_client:
-                continue
-            last_activity = get_last_activity(name, ssh_client)
-            if last_activity == "stopped":
-                # TODO: could be that the machine is just starting up....
-                if not dryrun:
-                    log.info("%s - stopping instance (launched %s)", name, i.launch_time)
-                    i.stop()
+    random.shuffle(all_instances)
+
+    q = Queue()
+    to_stop = Queue()
+
+    def worker():
+        while True:
+            try:
+                i = q.get(timeout=0.1)
+            except Empty:
+                return
+            try:
+                if aws_safe_stop_instance(i, impaired_ids, passwords,
+                                          dryrun=dryrun):
+                    to_stop.put(i)
+            except Exception:
+                log.warning("%s - unable to stop" % i.tags.get('Name'),
+                            exc_info=True)
+
+    for i in all_instances:
+        q.put(i)
+
+    # Workaround for http://bugs.python.org/issue11108
+    time.strptime("19000102030405", "%Y%m%d%H%M%S")
+    threads = []
+    for i in range(concurrency):
+        t = threading.Thread(target=worker)
+        t.start()
+        threads.append(t)
+
+    while threads:
+        for t in threads[:]:
+            try:
+                if t.is_alive():
+                    t.join(timeout=0.5)
                 else:
-                    log.info("%s - would have stopped", name)
-                continue
+                    t.join()
+                    threads.remove(t)
+            except KeyboardInterrupt:
+                raise SystemExit(1)
 
-            if last_activity == "booting":
-                # Wait harder
-                continue
+    total_stopped = {}
+    while not to_stop.empty():
+        i = to_stop.get()
+        if not dryrun:
+            i.update()
+        if 'moz-type' not in i.tags:
+            log.info("%s - has no moz-type! (%s)" % (i.tags.get('Name'), i.id))
 
-            log.debug("%s - last activity %is ago", name, last_activity)
-            # Determine if the machine is idle for more than 10 minutes
-            if last_activity > 300:
-                if not dryrun:
-                    # Hit graceful shutdown on the master
-                    log.info("%s - starting graceful shutdown", name)
-                    graceful_shutdown(name, ip, ssh_client)
+        t = i.tags.get('moz-type', 'notype')
+        if t not in total_stopped:
+            total_stopped[t] = 0
+        total_stopped[t] += 1
 
-                    # Check if we've exited right away
-                    if get_last_activity(name, ssh_client) == "stopped":
-                        log.info("%s - stopping instance", name)
-                        i.stop()
-                else:
-                    log.info("%s - would have started graceful shutdown", name)
-            else:
-                log.debug("%s - not stopping", name)
+    for t, c in sorted(total_stopped.items()):
+        log.info("%s - stopped %i" % (t, c))
 
 if __name__ == '__main__':
-    from optparse import OptionParser
-    parser = OptionParser()
-    parser.set_defaults(
-        regions=[],
-        secrets=None,
-        passwords=None,
-        loglevel=logging.INFO,
-        dryrun=False,
-    )
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-r", "--region", action="append", dest="regions",
+                        required=True)
+    parser.add_argument("-k", "--secrets", type=argparse.FileType('r'),
+                        required=True)
+    parser.add_argument("-v", "--verbose", action="store_const",
+                        dest="loglevel", const=logging.DEBUG,
+                        default=logging.INFO)
+    parser.add_argument("-p", "--passwords", type=argparse.FileType('r'),
+                        required=True)
+    parser.add_argument("-j", "--concurrency", type=int, default=8)
+    parser.add_argument("--dry-run", action="store_true")
 
-    parser.add_option("-r", "--region", action="append", dest="regions")
-    parser.add_option("-k", "--secrets", dest="secrets")
-    parser.add_option("-s", "--key-name", dest="key_name")
-    parser.add_option("-v", "--verbose", action="store_const", dest="loglevel", const=logging.DEBUG)
-    parser.add_option("-p", "--passwords", dest="passwords")
-    parser.add_option("--dry-run", action="store_true", dest="dryrun")
+    args = parser.parse_args()
 
-    options, args = parser.parse_args()
-
-    logging.basicConfig(level=options.loglevel, format="%(asctime)s - %(message)s")
+    logging.basicConfig(level=args.loglevel, format="%(asctime)s - %(message)s")
     logging.getLogger("boto").setLevel(logging.WARN)
     logging.getLogger("paramiko").setLevel(logging.WARN)
     logging.getLogger('requests').setLevel(logging.WARN)
 
-    if not options.regions:
-        parser.error("at least one region is required")
+    passwords = json.load(args.passwords)
+    secrets = json.load(args.secrets)
+    secrets = dict(aws_access_key_id=secrets['aws_access_key_id'],
+                   aws_secret_access_key=secrets['aws_secret_access_key'])
 
-    if not options.secrets:
-        parser.error("secrets are required")
-
-    if not options.passwords:
-        parser.error("passwords are required")
-
-    secrets = json.load(open(options.secrets))
-    passwords = json.load(open(options.passwords))
-
-    aws_stop_idle(secrets, passwords, options.regions, dryrun=options.dryrun)
+    aws_stop_idle(secrets, passwords, args.regions, dryrun=args.dry_run,
+                  concurrency=args.concurrency)

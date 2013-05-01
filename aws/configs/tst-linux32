@@ -1,0 +1,33 @@
+{
+    "hostname": "tst-linux32-ec2-%03d",
+    "us-east-1": {
+        "type": "tst-linux32",
+        "domain": "test.releng.use1.mozilla.com",
+        "ami": "ami-ea8e1e83",
+        "subnet_ids": ["subnet-8f32cbe5", "subnet-3835cc52", "subnet-ed35cc87", "subnet-ae35ccc4"],
+        "security_group_ids": [],
+        "instance_type": "m1.medium",
+        "distro": "ubuntu",
+        "device_map": {
+            "/dev/sda1": {
+                "size": 30,
+                "instance_dev": "/dev/xvda1"
+            }
+        }
+    },
+    "us-west-2": {
+        "type": "tst-linux32",
+        "domain": "test.releng.usw2.mozilla.com",
+        "ami": "ami-040c8634",
+        "subnet_ids": ["subnet-d6cba8bf", "subnet-aecba8c7", "subnet-a4cba8cd"],
+        "security_group_ids": [],
+        "instance_type": "m1.medium",
+        "distro": "ubuntu",
+        "device_map": {
+            "/dev/sda1": {
+                "size": 30,
+                "instance_dev": "/dev/xvda1"
+            }
+        }
+    }
+}
