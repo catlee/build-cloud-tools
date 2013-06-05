@@ -12,7 +12,7 @@ import logging
 log = logging.getLogger()
 
 
-def create_master(conn, name, options, config):
+def create_master(conn, fqdn, options, config):
     """Creates an AMI instance with the given name and config. The config must
     specify things like ami id."""
 
@@ -60,14 +60,15 @@ def create_master(conn, name, options, config):
         time.sleep(10)
         log.info("waiting...")
 
-    instance.add_tag('Name', name)
+    instance.add_tag('Name', fqdn.split('.')[0])
+    instance.add_tag('FQDN', fqdn)
     instance.add_tag('moz-type', 'puppetmaster')
 
     instance.add_tag('moz-state', 'pending')
-    puppetize(instance, name, options)
+    puppetize(instance, fqdn, options)
 
 
-def puppetize(instance, name, options):
+def puppetize(instance, fqdn, options):
     env.host_string = instance.private_ip_address
     env.user = 'root'
     env.abort_on_prompts = True
@@ -84,9 +85,7 @@ def puppetize(instance, name, options):
             log.exception("waiting...")
             time.sleep(10)
 
-    hostname = "{name}.srv.releng.aws-{region}.mozilla.com".format(
-        name=name, region=options.region)
-    run("hostname %s" % hostname)
+    run("hostname %s" % fqdn)
 
     # Set up yum repos
     run('rm -f /etc/yum.repos.d/*')
@@ -95,7 +94,7 @@ def puppetize(instance, name, options):
     run('yum clean all')
 
     # Get puppet installed
-    run('yum install -q -y puppet mercurial')
+    run('yum install -q -y puppet-2.7.17-1.el6 mercurial')
 
     # /var/lib/puppet skel
     run("test -d /var/lib/puppet/ssl || mkdir -m 771 /var/lib/puppet/ssl")
@@ -109,28 +108,31 @@ def puppetize(instance, name, options):
 
     # generate certs
     local("test -d certs.{h} || (mkdir certs.{h} && "
-          "./ca-scripts/generate-cert.sh {h} certs.{h})".format(h=hostname))
+          "./ca-scripts/generate-cert.sh {h} certs.{h})".format(h=fqdn))
 
     # put files to puppet dirs
-    put("certs.%s/ca_crt.pem" % hostname, "/var/lib/puppet/ssl/ca/ca_pub.pem",
+    put("certs.%s/ca_crt.pem" % fqdn, "/var/lib/puppet/ssl/ca/ca_pub.pem",
         mode=0644)
-    put("certs.%s/ca_crt.pem" % hostname, "/var/lib/puppet/ssl/certs/ca.pem",
+    put("certs.%s/ca_crt.pem" % fqdn, "/var/lib/puppet/ssl/certs/ca.pem",
         mode=0644)
-    put("certs.%s/ca_crl.pem" % hostname, "/var/lib/puppet/ssl/ca_crl.pem",
+    put("certs.%s/ca_crl.pem" % fqdn, "/var/lib/puppet/ssl/ca_crl.pem",
         mode=0644)
-    put("certs.{h}/{h}.crt".format(h=hostname),
-        "/var/lib/puppet/ssl/certs/%s.pem" % hostname, mode=0644)
-    put("certs.{h}/{h}.key".format(h=hostname),
-        "/var/lib/puppet/ssl/private_keys/%s.pem" % hostname, mode=0600)
-    put("certs.{h}/{h}.pub".format(h=hostname),
-        "/var/lib/puppet/ssl/public_keys/%s.pem" % hostname, mode=0644)
+    put("certs.{h}/{h}.crt".format(h=fqdn),
+        "/var/lib/puppet/ssl/certs/%s.pem" % fqdn, mode=0644)
+    put("certs.{h}/{h}.key".format(h=fqdn),
+        "/var/lib/puppet/ssl/private_keys/%s.pem" % fqdn, mode=0600)
+    put("certs.{h}/{h}.pub".format(h=fqdn),
+        "/var/lib/puppet/ssl/public_keys/%s.pem" % fqdn, mode=0644)
 
     run("if [ -e /etc/puppet/production ]; then "
         "cd /etc/puppet/production && "
         "hg pull -u; else "
         "hg clone http://hg.mozilla.org/build/puppet /etc/puppet/production; "
         "fi")
-    put("secrets/*.csv", "/etc/puppet/production/manifests/extlookup/")
+    put(options.puppet_secrets_file,
+        "/etc/puppet/production/manifests/extlookup/secrets.csv")
+    run("ln -s %s /etc/puppet/production/manifests/nodes.pp" % options.puppet_nodes_file)
+    run("ln -s %s /etc/puppet/production/manifests/config.pp" % options.puppet_config_file)
 
     with settings(warn_only=True):
         result = run("bash /etc/puppet/production/setup/masterize.sh")
@@ -143,20 +145,29 @@ def puppetize(instance, name, options):
 
 # TODO: Move this into separate file(s)
 configs = {
+    "centos-6-x64-base-servo": {
+        "us-east-1": {
+            "ami": "ami-cefe66a7",
+            "subnet_id": ["subnet-e8f5fe84", "subnet-acf5fec0"],
+            "security_group_ids": ["sg-b36a84dc"],
+            "instance_type": "m1.medium",
+            "repo_snapshot_id": "snap-b4917de9",  # This will be mounted at /data
+        },
+    },
     "centos-6-x64-base": {
         "us-east-1": {
-            "ami": "ami-049b1e6d",
+            "ami": "ami-cefe66a7",
             "subnet_id": ["subnet-33a98358", "subnet-35a9835e", " subnet-0aa98361"],
             "security_group_ids": ["sg-b36a84dc"],
             "instance_type": "m1.large",
-            "repo_snapshot_id": "snap-fd4441a5",  # This will be mounted at /data
+            "repo_snapshot_id": "snap-b4917de9",  # This will be mounted at /data
         },
         "us-west-2": {
-            "ami": "ami-16d15926",
+            "ami": "ami-15cb5f25",
             "subnet_id": ["subnet-b948dad0", "subnet-ba48dad3", "subnet-bf48dad6"],
             "security_group_ids": ["sg-4e2d3022"],
             "instance_type": "m1.large",
-            "repo_snapshot_id": "snap-176e3b2f",  # This will be mounted at /data
+            "repo_snapshot_id": " snap-dcd333e7",  # This will be mounted at /data
         },
     },
 }
@@ -170,7 +181,10 @@ if __name__ == '__main__':
     parser.add_argument("-k", "--secrets", type=argparse.FileType('r'),
                         required=True, help="file where secrets can be found")
     parser.add_argument("-s", "--key-name", help="SSH key name", required=True)
-    parser.add_argument("hostname", nargs=1, help="Hostname of puppet master")
+    parser.add_argument("--puppet-secrets-file", required=True)
+    parser.add_argument("--puppet-nodes-file", required=True)
+    parser.add_argument("--puppet-config-file", required=True)
+    parser.add_argument("fqdn", nargs=1, help="FQDN of puppet master")
 
     args = parser.parse_args()
 
@@ -186,4 +200,4 @@ if __name__ == '__main__':
     except KeyError:
         parser.error("unknown configuration")
 
-    create_master(conn, args.hostname[0], args, config)
+    create_master(conn, args.fqdn[0], args, config)
