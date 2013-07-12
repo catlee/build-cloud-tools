@@ -218,6 +218,7 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
                     hostname=instance_data['name'],
                     domain=instance_data['domain'],
                     dns_search_domain=config.get('dns_search_domain'),
+                    # TODO: Use a real password!
                     password="password123!",
                     )
             else:
@@ -385,6 +386,7 @@ if __name__ == '__main__':
         parser.error("unknown configuration")
 
     secrets = json.load(args.secrets)
+    # TODO: Not required for windows
     deploypass = getpass.getpass("Enter deploy password:").strip()
 
     instance_data = json.load(args.instance_data)
