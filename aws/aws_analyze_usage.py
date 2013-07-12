@@ -275,23 +275,22 @@ if __name__ == '__main__':
     """
     # Sort by count
     current_instances = aws_get_current_instance_counts(regions)
-    for (region, type_, r_type), d_count in sorted(delta.items(), key=lambda i: -i[1]):
+    for (region, type_, r_type), d_count in sorted(delta.items(), key=lambda i: (i[0][2], -i[1])):
         cur_count = current_reservations.get((region, type_, r_type), 0)
         best_count = best_reservations.get((region, type_, r_type), 0)
         print "{:9s} {:12s} {:4s} {:4d} {:4d} {:+4d}".format(region, type_, r_type, cur_count, best_count, d_count)
         az_weights = calc_az_weights(current_instances, region, type_)
+        #print az_weights
 
         # figure out delta per az
         delta_by_az = dict((az, 0) for az in az_weights)
-        for (az, t, u), c in current_az_reservations.items():
+        for az in delta_by_az:
+            c = current_az_reservations.get((az, type_, r_type), 0)
             r = az[:-1]
-            if r == region and t == type_:
-                # Sanity check that weighted best_reservations is less than the
-                # number of instances running
-                assert (best_reservations.get((r, t, u), 0) * az_weights.get(az, (0, 0))[1]) <= current_instances[az, t]
-                delta_by_az[az] = (best_reservations.get((r, t, u), 0) * az_weights.get(az, (0, 0))[1]) - c
+            if (best_reservations.get((region, type_, r_type), 0) * az_weights.get(az, (0, 0))[1]) <= current_instances.get((az, t), 0):
+                delta_by_az[az] = (best_reservations.get((region, type_, r_type), 0) * az_weights.get(az, (0, 0))[1]) - c
 
-        factor = 5.0  # TODO: remove hardcode
+        factor = 4.0  # TODO: remove hardcode
         for az, count in sorted(delta_by_az.items(), key=lambda x: -x[1]):
             delta_by_az[az] = int(round(count / factor))
             print "    {az} {count}".format(az=az, count=delta_by_az[az])
