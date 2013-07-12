@@ -43,21 +43,46 @@ def ip_available(conn, ip):
         return True
 
 
-def assimilate_windows(ip_addr, config, instance_data):
-    # Get puppet and ssh working
-    pass
+def assimilate_windows(instance, config, instance_data):
+    # Wait for the instance to stop, and then clear its userData and start it
+    # again
+    log.info("waiting for instance to shut down")
+    while True:
+        try:
+            instance.update()
+            if instance.state == 'stopped':
+                break
+        except Exception:
+            log.exception("hit error waiting for instance to stop")
+        time.sleep(10)
+
+    log.info("clearing userData")
+    instance.modify_attribute("userData", None)
+    log.info("starting instance")
+    instance.start()
+    log.info("waiting for instance to start")
+    # Wait for the instance to come up
+    while True:
+        try:
+            instance.update()
+            if instance.state == 'running':
+                break
+        except Exception:
+            log.exception("hit error waiting for instance to come up")
+        time.sleep(10)
 
 
-def assimilate(ip_addr, config, instance_data):
+def assimilate(instance, config, instance_data):
     """Assimilate hostname into our collective
 
     What this means is that hostname will be set up with some basic things like
     a script to grab AWS user data, and get it talking to puppet (which is
     specified in said config).
     """
+    ip_addr = instance.private_ip_address
     distro = config.get('distro')
     if distro.startswith('win'):
-        return assimilate_windows(ip_addr, config, instance_data)
+        return assimilate_windows(instance, config, instance_data)
 
     env.host_string = ip_addr
     env.user = 'root'
@@ -211,121 +236,18 @@ def create_instance(name, config, region, secrets, key_name, instance_data):
 
     while True:
         try:
-            user_data = """<powershell>
-Start-Transcript -Path 'c:\userdata-transcript.txt' -Force
-Set-StrictMode -Version Latest
-Set-ExecutionPolicy Unrestricted
- 
-Import-Module AWSPowerShell
-
-$log = 'c:\userdata-log.txt'
-Function Log ($str) {{
-    $d = Get-Date
-    Add-Content $log -value "$d - $str"
-}}
- 
-Log "Userdata started"
-
-# Set the administrator password; note that the password
-# has to meet some minimum requirements (length, numbers, and
-# I think a special symbol)
-Log "Setting password"
-
-$password = "password123!"
-net user Administrator $password
-
-# We need this helper, because PowerShell has a separate
-# notion of directory for all child commands, and directory
-# for the script. Running commands directly use the
-# location set by cd, while things like DownloadFile
-# will use the script directory (set by SetCurrentDirectory)
-#
-# This function makes things a little bit easier to follow
-Function SetDirectory ($dir) {{
-    Set-Location $dir
-    [System.IO.Directory]::SetCurrentDirectory($dir)
-}}
-
-# silent MSI install helper
-Function InstallMSI ($msi) {{
-    Start-Process -Wait -FilePath "msiexec.exe" -ArgumentList "/qb /i $msi"
-}}
-
-# HTTP download helper
-Function GetFromHTTP ($url, $path) {{
-    Log "Downloading $url to $path"
-    $client = new-object System.Net.WebClient
-    $client.DownloadFile($url, $path)
-}}
-
-# For setting the hostname
-Function SetHostname ($hostname, $domain) {{
-        # http://msdn.microsoft.com/en-us/library/ms724224(v=vs.85).aspx
-        $ComputerNamePhysicalDnsHostname = 5
-        $ComputerNamePhysicalDnsDomain = 6
-
-        Add-Type -TypeDefinition @"
-        using System;
-        using System.Runtime.InteropServices;
-
-        namespace ComputerSystem {{
-            public class Identification {{
-                [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
-                static extern bool SetComputerNameEx(int NameType, string lpBuffer);
-
-                public static bool SetPrimaryDnsSuffix(string suffix) {{
-                    try {{
-                        return SetComputerNameEx($ComputerNamePhysicalDnsDomain, suffix);
-                    }}
-                    catch (Exception) {{
-                        return false;
-                    }}
-                }}
-            }}
-        }}
-"@
-        [ComputerSystem.Identification]::SetPrimaryDnsSuffix($domain)
-        $computerName = Get-WmiObject Win32_ComputerSystem 
-        $computerName.Rename($hostname)
-}}
-
-SetHostname {hostname} {domain}
-
-SetDirectory $Env:USERPROFILE
-
-
-### Install python
-GetFromHTTP http://cruncher.srv.releng.scl3.mozilla.com/~catlee/python-2.7.5.msi python-2.7.5.msi
-Log "Installing python"
-Start-Process -Wait -FilePath "python-2.7.5.msi" -ArgumentList "/qn"
-Log "Done"
-
-
-### Install MozillaBuild
-GetFromHTTP http://cruncher.srv.releng.scl3.mozilla.com/~catlee/MozillaBuildSetup-Latest.exe MozillaBuildSetup-Latest.exe
-Log "Install MozillaBuild"
-Start-Process -Wait -FilePath "MozillaBuildSetup-Latest.exe" -ArgumentList "/S"
-Log "Done"
-
-
-### Install puppet
-GetFromHTTP http://cruncher.srv.releng.scl3.mozilla.com/~catlee/puppet-3.2.1.msi puppet-3.2.1.msi
-Log "Installing puppet"
-Start-Process -Wait -FilePath "msiexec.exe" -ArgumentList "/qb /i puppet-3.2.1.msi PUPPET_MASTER_SERVER={puppet_server} PUPPET_AGENT_CERTNAME={fqdn}"
-Log "Done"
-
-
-#Log "Running puppet"
-#Start-Process -Wait -FilePath "C:\Program Files (x86)\Puppet Labs\Puppet\bin\puppet.bat" -ArgumentList "agent --test --server {puppet_server}"
-
-Log "Done. Rebooting now!"
-shutdown /r /t 0
-</powershell>""".format(
-        puppet_server=instance_data['default_puppet_server'],
-        fqdn=instance_data['hostname'],
-        hostname=instance_data['name'],
-        domain=instance_data['domain'],
-)
+            if 'user_data_file' in config:
+                user_data = open(config['user_data_file']).read()
+                user_data = user_data.format(
+                    puppet_server=instance_data['default_puppet_server'],
+                    fqdn=instance_data['hostname'],
+                    hostname=instance_data['name'],
+                    domain=instance_data['domain'],
+                    dns_search_domain=config.get('dns_search_domain'),
+                    password="password123!",
+                    )
+            else:
+                user_data = None
 
             reservation = conn.run_instances(
                 image_id=config['ami'],
@@ -337,8 +259,8 @@ shutdown /r /t 0
                 private_ip_address=ip_address,
                 disable_api_termination=bool(config.get('disable_api_termination')),
                 security_group_ids=config.get('security_group_ids', []),
-                #user_data=config.get('user_data').encode('base64'),
                 user_data=user_data,
+                instance_profile_name=config.get('instance_profile_name'),
             )
             break
         except boto.exception.BotoServerError:
@@ -367,7 +289,7 @@ shutdown /r /t 0
     instance.add_tag('moz-state', 'pending')
     while True:
         try:
-            assimilate(instance.private_ip_address, config, instance_data)
+            assimilate(instance, config, instance_data)
             break
         except:
             log.exception("problem assimilating %s", instance)
@@ -480,7 +402,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
     try:
         config = json.load(args.config)[args.region]
@@ -501,7 +423,7 @@ if __name__ == '__main__':
         instance_data['domain'] = config['domain']
         instance_data['hostname'] = '{name}.{domain}'.format(
             name=args.hosts[0], domain=config['domain'])
-        assimilate(instance.private_ip_address, config, instance_data)
+        assimilate(instance, config, instance_data)
     else:
         make_instances(args.hosts, config, args.region, secrets, args.key_name,
                        instance_data)

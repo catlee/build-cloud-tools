@@ -2,14 +2,14 @@
     "hostname": "tst-win64-ec2-%03d",
     "us-east-1": {
         "type": "tst-win64",
+        "instance_profile_name": "tst-win64",
         "domain": "test.releng.use1.mozilla.com",
-        "dns_search_domain": "srv.releng.use1.mozilla.com",
-        "ami": "ami-96e39fff",
+        "ami": "ami-c3b8d6aa",
         "subnet_ids": ["subnet-8f32cbe5", "subnet-3835cc52", "subnet-ed35cc87", "subnet-ae35ccc4"],
         "security_group_ids": ["sg-18a07677", "sg-f3927c9c"],
         "instance_type": "m1.medium",
         "distro": "win2012",
-        "user_data_file": "configs/tst-win64.user_data",
+        "user_data_file": "ami_configs/tst-win64.user_data",
         "device_map": {
             "/dev/sda1": {
                 "size": 30,
