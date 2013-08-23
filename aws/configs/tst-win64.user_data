@@ -76,19 +76,20 @@ Set-DnsClientGlobalSetting -SuffixSearchList @("{dns_search_domain}")
 SetDirectory $Env:USERPROFILE
 
 Log "Setting up ssh"
-net stop sshd
-Start-Process -Wait -FilePath C:\cygwin\bin\bash.exe -ArgumentList "--login -c '/bin/ssh-host-config -y -w {password}'"
-net start sshd
+SetDirectory "C:\Program Files (x86)\KTS"
+& .\install.bat
 Log "Done"
 
+### cltbld-starter logs in first, which then logs in locally as cltbld via RDP
 Log "Setting up autologon."
 SetDirectory $Env:USERPROFILE
-Start-Process -Wait -FilePath Autologon.exe -ArgumentList "/accepteula cltbld $env:COMPUTERNAME {password}"
+Start-Process -Wait -FilePath Autologon.exe -ArgumentList "/accepteula cltbld-starter $env:COMPUTERNAME {password}"
 Log "Done"
 
 Log "Resetting Admininstrator password"
 net user Administrator {password}
 
+### User policies allow cltbld to reboot the machine
 Log "Setting up cltbld user policies"
 secedit /import /cfg userpolicy.inf /db userpolicy.sdb
 secedit /configure /db userpolicy.sdb

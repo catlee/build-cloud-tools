@@ -1,7 +1,6 @@
 <powershell>
 ### TODO: Add error handling
 ### TODO: Check Windows defender, indexing service
-### TODO: Allow cltbld to reboot the machine
 ### TODO: Add runslave.bat with: msys, unzip, hg (to system-wide path?)
 ### TODO: Figure out how to resolve http://repos/
 ### TODO: Minimize cmdwindow?
@@ -85,18 +84,34 @@ InstallMSI Microsoft_VC100_DebugCRT_x86.msi
 Log "Done"
 
 ### Install cygwin (for ssh)
-GetFromS3 cygwin_setup.exe
-Log "Install cygwin"
-Start-Process -Wait -FilePath "cygwin_setup.exe" -ArgumentList "--quiet-mode --root C:\cygwin --site http://mirror.cs.vt.edu/pub/cygwin/cygwin/ --packages openssh"
-Log "Done"
+# GetFromS3 cygwin_setup.exe
+# Log "Install cygwin"
+# Start-Process -Wait -FilePath "cygwin_setup.exe" -ArgumentList "--quiet-mode --root C:\cygwin --site http://mirror.cs.vt.edu/pub/cygwin/cygwin/ --packages openssh"
+# Log "Done"
+
+# Log "Adding sshd to firewall"
+# netsh advfirewall firewall add rule name="sshd" dir=in action=allow program=C:\cygwin\usr\sbin\sshd.exe enable=yes
+# Log "Done"
+
+### Install SSH
+Log "Installing SSH"
+SetDirectory "C:\Program Files (x86)"
+GetFromS3 KTS.zip
+& $MOZBUILD\7zip\7z x -y KTS.zip
+del KTS.zip
+SetDirectory "C:\Program Files (x86)\KTS"
+& .\install.bat
 
 Log "Adding sshd to firewall"
-netsh advfirewall firewall add rule name="sshd" dir=in action=allow program=C:\cygwin\usr\sbin\sshd.exe enable=yes
+netsh advfirewall firewall add rule name="sshd" dir=in action=allow program="C:\Program Files (x86)\KTS\daemon.exe" enable=yes
 Log "Done"
+
+
 
 
 ### Install buildbot
 Log "Installing buildbot"
+SetDirectory $Env:USERPROFILE
 # Grab Python and its packages from S3, all in a single tar file.
 GetFromS3 python-packages.tar
 & $MOZBUILD\7zip\7z x -y python-packages.tar
@@ -152,10 +167,15 @@ Add-Content "$VIRTUALENV\twisted.patch" -value @"
 "@
 & $MOZBUILD\msys\bin\patch.exe "$VIRTUALENV\Lib\site-packages\Twisted-13.0.0-py2.7-win32.egg\twisted\internet\_dumbwin32proc.py" "$VIRTUALENV\twisted.patch" 
 
-### Set up cltbld
+### Set up users
 net user cltbld password123! /add
 net localgroup "Remote Desktop Users" cltbld /add
+
+net user cltbld-starter password123! /add
+net localgroup "Remote Desktop Users" cltbld-starter /add
+
 net user Administrator password123!
+
 # Get this for later
 SetDirectory $Env:USERPROFILE
 GetFromS3 Autologon.exe
@@ -170,6 +190,19 @@ Log "Grabbed runslave.py"
 Log "Creating scheduled task to run buildbot on boot"
 schtasks /create /tn runslave /tr "C:\runslave.bat" /sc ONLOGON /ru cltbld
 Log "Done"
+
+Log "Creating scheduled task to login to localhost via RDP on boot"
+# From http://www.donkz.nl/
+# Does cmdline rdp sessions
+# Run "rdp.exe /encrypt" to generate encrypted forms of passwords
+GetFromS3 rdp.exe
+schtasks /create /tn start-rdp /tr "C:\rdp.exe /v:localhost /u:cltbld /pe:yh5N6RwzTCKP7F1MtkYcSNFpeKSSeSzOXyLv0bcUoSw= /f /w:1280 /h:1024" /sc ONLOGON /ru cltbld-starter
+Log "Done"
+
+### We use uptime.exe from aws_stop_idle.py to find the host's uptime since we
+### don't always have access to run 'net stats srv'
+GetFromS3 uptime.exe
+
 
 ### Set up the maintenance service
 Log "Setting up maintenance service"

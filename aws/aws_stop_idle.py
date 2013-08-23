@@ -17,6 +17,7 @@ from Queue import Queue, Empty
 
 import boto.ec2
 from paramiko import SSHClient
+from ssh import SSHConsole
 import requests
 
 import logging
@@ -34,7 +35,8 @@ def get_buildbot_instances(conn):
     for r in reservations:
         for i in r.instances:
             name = i.tags['Name']
-            if not re.match(".*-ec2-\d+", name):
+            #if not re.match(".*-ec2-\d+", name):
+            if not re.match("tst-w64-ec2-\d+", name):
                 continue
             retval.append(i)
 
@@ -47,6 +49,13 @@ class IgnorePolicy:
 
 
 def get_ssh_client(name, ip, credentials):
+    client = SSHConsole(ip, credentials)
+    try:
+        client.connect()
+        return client
+    except:
+        log.warning("Couldn't log into {name} at {ip} with any known passwords".format(name=name, ip=ip))
+        return None
     client = SSHClient()
     client.set_missing_host_key_policy(IgnorePolicy())
     for u, passwords in credentials.iteritems():
@@ -56,32 +65,59 @@ def get_ssh_client(name, ip, credentials):
                 return client
             except Exception:
                 pass
+                #log.debug("Couldn't log into {name} at {ip} - {u} {p}".format(name=name, ip=ip, u=u, p=p), exc_info=True)
 
     log.warning("Couldn't log into {name} at {ip} with any known passwords".format(name=name, ip=ip))
     return None
 
 
-def get_last_activity(name, client):
-    stdin, stdout, stderr = client.exec_command("date +%Y%m%d%H%M%S")
-    slave_time = stdout.read().strip()
-    slave_time = time.mktime(time.strptime(slave_time, "%Y%m%d%H%M%S"))
+def guess_basedir(name):
+    if "w64" in name:
+        return "/c/slave"
+    else:
+        return "/builds/slave"
 
-    stdin, stdout, stderr = client.exec_command("cat /proc/uptime")
-    uptime = float(stdout.read().split()[0])
+
+def get_uptime(name, client):
+    if "w64" in name:
+        _, stdout = client.run_cmd("/c/uptime.exe")
+        # 0 day(s), 4 hour(s), 46 minute(s), 10 second(s)
+        m = re.search(r"(\d+) day\(s\), (\d+) hour\(s\), (\d+) minute\(s\), (\d+) s", stdout, re.M)
+        if m is None:
+            raise ValueError("couldn't parse output: %s" % stdout)
+        days = int(m.group(1))
+        hours = int(m.group(2))
+        minutes = int(m.group(3))
+        seconds = int(m.group(4))
+        uptime = seconds + (60 * minutes) + (3600 * hours) + (86400 * days)
+    else:
+        _, stdout = client.run_cmd("cat /proc/uptime")
+        uptime = float(stdout.split()[0])
+
+    return uptime
+
+
+def get_last_activity(name, client):
+    _, stdout = client.run_cmd("date +%Y%m%d%H%M%S")
+    m = re.search("\d{14}", stdout, re.M)
+    slave_time = time.mktime(time.strptime(m.group(0), "%Y%m%d%H%M%S"))
+
+    uptime = get_uptime(name, client)
 
     if uptime < 3 * 60:
         # Assume we're still booting
-        log.debug("%s - uptime is %.2f; assuming we're still booting up", name, uptime)
+        log.debug("%s - uptime is %.2f; assuming we're still booting up" % (name, uptime))
         return "booting"
 
-    stdin, stdout, stderr = client.exec_command("tail -n 100 /builds/slave/twistd.log.1 /builds/slave/twistd.log")
-    stdin.close()
+    basedir = guess_basedir(name)
+
+    _, stdout = client.run_cmd("tail -n 50 {basedir}/twistd.log.1 {basedir}/twistd.log".format(basedir=basedir))
 
     last_activity = None
     running_command = False
     t = time.time()
     line = ""
-    for line in stdout:
+    for line in stdout.splitlines():
         m = re.search("^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
         if m:
             t = time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
@@ -91,7 +127,7 @@ def get_last_activity(name, client):
             continue
 
         # uncomment to dump out ALL the lines
-        #log.debug("%s - %s", name, line.strip())
+        # log.debug("%s - %s", name, line.strip())
 
         if "RunProcess._startCommand" in line or "using PTY: " in line:
             log.debug("%s - started command - %s", name, line.strip())
@@ -116,34 +152,30 @@ def get_last_activity(name, client):
 
     # If this was over 10 minutes ago
     if (slave_time - t) > 10 * 60 and (slave_time - t) > uptime:
-        log.warning("%s - shut down happened %ss ago, but we've been up for %ss - %s", name, slave_time - t, uptime, line.strip())
-        # If longer than 30 minutes, try rebooting
+        log.warning("%s - shut down happened %ss ago, but we've been up for %ss - %s" % (name, slave_time - t, uptime, line.strip()))
+        # If longer than 30 minutes, stop the instance
         if (slave_time - t) > 30 * 60:
-            log.warning("%s - rebooting", name)
-            stdin, stdout, stderr = client.exec_command("sudo reboot")
-            stdin.close()
+            return "stuck"
 
-    # If there's *no* activity (e.g. no twistd.log files), and we've been up a while, then reboot
+    # If there's *no* activity (e.g. no twistd.log files), and we've been up a while, then stop
     if last_activity is None and uptime > 15 * 60:
-        log.warning("%s - no activity; rebooting", name)
-        # If longer than 30 minutes, try rebooting
-        stdin, stdout, stderr = client.exec_command("sudo reboot")
-        stdin.close()
+        log.warning("%s - no activity; stopping", name)
+        return "stuck"
 
     log.debug("%s - %s - %s", name, last_activity, line.strip())
     return last_activity
 
 
-def get_tacfile(client):
-    stdin, stdout, stderr = client.exec_command("cat /builds/slave/buildbot.tac")
-    stdin.close()
-    data = stdout.read()
-    return data
+def get_tacfile(name, client):
+    basedir = guess_basedir(name)
+    #log.debug("getting tacfile from {basedir}/buildbot.tac".format(basedir=basedir))
+    _, stdout = client.run_cmd("cat {basedir}/buildbot.tac".format(basedir=basedir))
+    return stdout
 
 
-def get_buildbot_master(client, masters_json):
-    tacfile = get_tacfile(client)
-    host = re.search("^buildmaster_host = '(.*?)'$", tacfile, re.M)
+def get_buildbot_master(name, client, masters_json):
+    tacfile = get_tacfile(name, client)
+    host = re.search("^buildmaster_host = '(.*?)'", tacfile, re.M)
     host = host.group(1)
     port = None
     for master in masters_json:
@@ -157,7 +189,7 @@ def get_buildbot_master(client, masters_json):
 def graceful_shutdown(name, ip, client, masters_json):
     # Find out which master we're attached to by looking at buildbot.tac
     log.debug("%s - looking up which master we're attached to", name)
-    host, port = get_buildbot_master(client, masters_json)
+    host, port = get_buildbot_master(name, client, masters_json)
 
     url = "http://{host}:{port}/buildslaves/{name}/shutdown".format(host=host, port=port, name=name)
     log.debug("%s - POSTing to %s", name, url)
@@ -167,6 +199,7 @@ def graceful_shutdown(name, ip, client, masters_json):
 def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=False):
     "Returns True if stopped"
     name = i.tags['Name']
+    log.debug("looking at %s", name)
     # TODO: Check with slavealloc
 
     ip = i.private_ip_address
@@ -185,7 +218,7 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=Fa
                     log.info("%s - would have stopped", name)
         return stopped
     last_activity = get_last_activity(name, ssh_client)
-    if last_activity == "stopped":
+    if last_activity in ("stopped", "stuck"):
         stopped = True
         if not dryrun:
             log.info("%s - stopping instance (launched %s)", name, i.launch_time)
@@ -198,7 +231,7 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=Fa
         # Wait harder
         return stopped
 
-    log.debug("%s - last activity %is ago", name, last_activity)
+    log.debug("%s - last activity %s ago", name, last_activity)
     # Determine if the machine is idle for more than 10 minutes
     if last_activity > 300:
         if not dryrun:
@@ -337,6 +370,7 @@ if __name__ == '__main__':
     logging.getLogger("boto").setLevel(logging.WARN)
     logging.getLogger("paramiko").setLevel(logging.WARN)
     logging.getLogger('requests').setLevel(logging.WARN)
+    #logging.getLogger('ssh').setLevel(logging.WARN)
 
     formatter = logging.Formatter("%(asctime)s - %(message)s")
     handler = logging.StreamHandler()
@@ -359,7 +393,7 @@ if __name__ == '__main__':
     try:
         masters_json = json.load(open(args.masters_json))
     except IOError:
-        masters_json = requests.get(args.masters_json).json
+        masters_json = requests.get(args.masters_json).json()
 
     aws_stop_idle(secrets, credentials, args.regions, masters_json,
                   dryrun=args.dry_run, concurrency=args.concurrency)
