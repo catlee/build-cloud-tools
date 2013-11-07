@@ -4,6 +4,7 @@ Watches pending jobs and starts or creates EC2 instances if required
 """
 import re
 import time
+from collections import defaultdict
 
 try:
     import simplejson as json
@@ -21,13 +22,13 @@ log = logging.getLogger()
 
 
 def find_pending(db):
-    engine = sa.create_engine(db)
-    inspector = Inspector(engine)
+    inspector = Inspector(db)
     # Newer buildbot has a "buildrequest_claims" table
     if "buildrequest_claims" in inspector.get_table_names():
+        # TODO: fix this
         query = sa.text("""
         SELECT buildername, count(*) FROM
-               buildrequests WHERE
+               buildrequests, builds WHERE
                complete=0 AND
                submitted_at > :yesterday AND
                submitted_at < :toonew AND
@@ -37,22 +38,26 @@ def find_pending(db):
     # Older buildbot doesn't
     else:
         query = sa.text("""
-        SELECT buildername, count(*) FROM
+        SELECT buildername, id FROM
                buildrequests WHERE
                complete=0 AND
                claimed_at=0 AND
                submitted_at > :yesterday AND
-               submitted_at < :toonew
+               submitted_at < :toonew""")
 
-               GROUP BY buildername""")
-
-    result = engine.execute(
+    result = db.execute(
         query,
         yesterday=time.time() - 86400,
         toonew=time.time() - 60
     )
     retval = result.fetchall()
     return retval
+
+
+def find_retries(db, brid):
+    """Returns the number of previous builds for this build request id"""
+    q = sa.text("SELECT count(*) from builds where brid=:brid")
+    return db.execute(q, brid=brid).fetchone()[0]
 
 
 # Used by aws_connect_to_region to cache connection objects per region
@@ -241,36 +246,50 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets,
     return started
 
 
-def aws_watch_pending(db, regions, secrets, builder_map, region_priorities,
+def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
                       dryrun):
     # First find pending jobs in the db
+    db = sa.create_engine(dburl)
     pending = find_pending(db)
 
     # Mapping of instance types to # of instances we want to creates
-    to_create = {}
+    to_create_ondemand = defaultdict(int)
+    to_create_spot = defaultdict(int)
     # Then match them to the builder_map
-    for pending_buildername, count in pending:
+    for pending_buildername, brid in pending:
         for buildername_exp, instance_type in builder_map.items():
             if re.match(buildername_exp, pending_buildername):
-                log.debug("%s has %i pending jobs, checking instances of type "
-                          "%s" % (pending_buildername, count, instance_type))
-                to_create[instance_type] = to_create.get(instance_type, 0) + count
-
+                if find_retries(db, brid) == 0:
+                    to_create_spot[instance_type] += 1
+                else:
+                    to_create_ondemand[instance_type] += 1
                 break
         else:
-            log.debug("%s has %i pending jobs, but no instance types defined" %
-                      (pending_buildername, count))
+            log.debug("%s has pending jobs, but no instance types defined",
+                      pending_buildername)
 
-    for instance_type, count in to_create.items():
-        log.debug("need %i %s" % (count, instance_type))
+    for instance_type, count in to_create_spot.items():
+        log.debug("need %i spot %s", count, instance_type)
+
+        # TODO!
+        started = 0
+        count -= started
+        log.info("%s - started %i spot instances; need %i",
+                 instance_type, started, count)
+
+        # Add leftover to ondemand
+        to_create_ondemand[instance_type] += count
+
+    for instance_type, count in to_create_ondemand.items():
+        log.debug("need %i ondemand %s", count, instance_type)
 
         # Check for stopped instances in the given regions and start them if
         # there are any
         started = aws_resume_instances(instance_type, count, regions, secrets,
                                        region_priorities, dryrun)
         count -= started
-        log.info("%s - started %i instances; need %i" %
-                 (instance_type, started, count))
+        log.info("%s - started %i instances; need %i",
+                 instance_type, started, count)
 
 if __name__ == '__main__':
     import argparse
