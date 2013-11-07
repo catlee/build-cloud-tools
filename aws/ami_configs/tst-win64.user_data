@@ -83,16 +83,6 @@ InstallMSI Microsoft_VC100_DebugCRT_x64.msi
 InstallMSI Microsoft_VC100_DebugCRT_x86.msi
 Log "Done"
 
-### Install cygwin (for ssh)
-# GetFromS3 cygwin_setup.exe
-# Log "Install cygwin"
-# Start-Process -Wait -FilePath "cygwin_setup.exe" -ArgumentList "--quiet-mode --root C:\cygwin --site http://mirror.cs.vt.edu/pub/cygwin/cygwin/ --packages openssh"
-# Log "Done"
-
-# Log "Adding sshd to firewall"
-# netsh advfirewall firewall add rule name="sshd" dir=in action=allow program=C:\cygwin\usr\sbin\sshd.exe enable=yes
-# Log "Done"
-
 ### Install SSH
 Log "Installing SSH"
 SetDirectory "C:\Program Files (x86)"
@@ -105,9 +95,6 @@ SetDirectory "C:\Program Files (x86)\KTS"
 Log "Adding sshd to firewall"
 netsh advfirewall firewall add rule name="sshd" dir=in action=allow program="C:\Program Files (x86)\KTS\daemon.exe" enable=yes
 Log "Done"
-
-
-
 
 ### Install buildbot
 Log "Installing buildbot"
@@ -170,11 +157,14 @@ Add-Content "$VIRTUALENV\twisted.patch" -value @"
 ### Set up users
 net user cltbld password123! /add
 net localgroup "Remote Desktop Users" cltbld /add
+wmic path Win32_UserAccount where Name='cltbld' set PasswordExpires=false
 
 net user cltbld-starter password123! /add
 net localgroup "Remote Desktop Users" cltbld-starter /add
+wmic path Win32_UserAccount where Name='cltbld-starter' set PasswordExpires=false
 
 net user Administrator password123!
+wmic path Win32_UserAccount where Name='Administrator' set PasswordExpires=false
 
 # Get this for later
 SetDirectory $Env:USERPROFILE
@@ -187,6 +177,10 @@ GetFromS3 runslave.py
 GetFromS3 runslave.bat
 Log "Grabbed runslave.py"
 
+Log "Enabling cleartype on login"
+schtasks /create /tn cleartype /tr "powershell -noexit C:\cleartype.ps1" /sc ONLOGON /ru cltbld
+Log "Done"
+
 Log "Creating scheduled task to run buildbot on boot"
 schtasks /create /tn runslave /tr "C:\runslave.bat" /sc ONLOGON /ru cltbld
 Log "Done"
@@ -196,7 +190,10 @@ Log "Creating scheduled task to login to localhost via RDP on boot"
 # Does cmdline rdp sessions
 # Run "rdp.exe /encrypt" to generate encrypted forms of passwords
 GetFromS3 rdp.exe
-schtasks /create /tn start-rdp /tr "C:\rdp.exe /v:localhost /u:cltbld /pe:yh5N6RwzTCKP7F1MtkYcSNFpeKSSeSzOXyLv0bcUoSw= /f /w:1280 /h:1024" /sc ONLOGON /ru cltbld-starter
+GetFromS3 start-rdp.bat
+GetFromS3 cleartype.ps1
+
+schtasks /create /tn start-rdp /tr "C:\start-rdp.bat" /sc ONLOGON /ru cltbld-starter
 Log "Done"
 
 ### We use uptime.exe from aws_stop_idle.py to find the host's uptime since we
@@ -224,6 +221,8 @@ Log "Installed service registry keys"
 & $MOZBUILD\7zip\7z x -y maintenanceservice.zip
 & .\maintenanceservice_installer.exe
 Log "Installed service"
+
+Log "Done"
 
 # Enable EC2Config to run at the next boot
 Log "Enabling EC2Config at next boot"

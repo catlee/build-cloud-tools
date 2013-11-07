@@ -88,6 +88,7 @@ Log "Done"
 
 Log "Resetting Admininstrator password"
 net user Administrator {password}
+wmic path Win32_UserAccount where Name='Administrator' set PasswordExpires=false
 
 ### User policies allow cltbld to reboot the machine
 Log "Setting up cltbld user policies"
@@ -95,6 +96,11 @@ secedit /import /cfg userpolicy.inf /db userpolicy.sdb
 secedit /configure /db userpolicy.sdb
 Remove-Item userpolicy.inf
 Remove-Item userpolicy.sdb
+Log "Done"
+
+# Enable the Desktop Experience! Ooooh
+Log "Enabling Desktop Experience"
+dism /Online /Enable-Feature /FeatureName:DesktopExperience /All /NoRestart
 Log "Done"
 
 ### Shutdown to signal we're done. We also need to shutdown/restart to get the hostname changed
