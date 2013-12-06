@@ -76,24 +76,31 @@ Set-DnsClientGlobalSetting -SuffixSearchList @("{dns_search_domain}")
 SetDirectory $Env:USERPROFILE
 
 Log "Setting up ssh"
-net stop sshd
-Start-Process -Wait -FilePath C:\cygwin\bin\bash.exe -ArgumentList "--login -c '/bin/ssh-host-config -y -w {password}'"
-net start sshd
+SetDirectory "C:\Program Files (x86)\KTS"
+& .\install.bat
 Log "Done"
 
+### cltbld-starter logs in first, which then logs in locally as cltbld via RDP
 Log "Setting up autologon."
 SetDirectory $Env:USERPROFILE
-Start-Process -Wait -FilePath Autologon.exe -ArgumentList "/accepteula cltbld $env:COMPUTERNAME {password}"
+Start-Process -Wait -FilePath Autologon.exe -ArgumentList "/accepteula cltbld-starter $env:COMPUTERNAME {password}"
 Log "Done"
 
 Log "Resetting Admininstrator password"
 net user Administrator {password}
+wmic path Win32_UserAccount where Name='Administrator' set PasswordExpires=false
 
+### User policies allow cltbld to reboot the machine
 Log "Setting up cltbld user policies"
 secedit /import /cfg userpolicy.inf /db userpolicy.sdb
 secedit /configure /db userpolicy.sdb
 Remove-Item userpolicy.inf
 Remove-Item userpolicy.sdb
+Log "Done"
+
+# Enable the Desktop Experience! Ooooh
+Log "Enabling Desktop Experience"
+dism /Online /Enable-Feature /FeatureName:DesktopExperience /All /NoRestart
 Log "Done"
 
 ### Shutdown to signal we're done. We also need to shutdown/restart to get the hostname changed

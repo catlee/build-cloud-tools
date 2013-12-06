@@ -4,7 +4,7 @@
         "type": "tst-win64",
         "domain": "test.releng.use1.mozilla.com",
         "dns_search_domain": "srv.releng.use1.mozilla.com",
-        "ami": "ami-96e39fff",
+        "ami": "ami-b785d9de",
         "subnet_ids": ["subnet-8f32cbe5", "subnet-3835cc52", "subnet-ed35cc87", "subnet-ae35ccc4"],
         "security_group_ids": ["sg-18a07677", "sg-f3927c9c"],
         "instance_type": "m1.medium",

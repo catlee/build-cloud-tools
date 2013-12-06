@@ -213,7 +213,7 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
             if 'user_data_file' in config:
                 user_data = open(config['user_data_file']).read()
                 user_data = user_data.format(
-                    puppet_server=instance_data['default_puppet_server'],
+                    puppet_server=instance_data.get('default_puppet_server'),
                     fqdn=instance_data['hostname'],
                     hostname=instance_data['name'],
                     domain=instance_data['domain'],
