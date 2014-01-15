@@ -51,7 +51,9 @@ def create_instance(connection, instance_name, config, key_name):
                                           delete_on_termination=True)
 
     if 'user_data_file' in config:
+        log.debug("reading user_data from '%s'" % config['user_data_file'])
         user_data = open(config['user_data_file']).read()
+        # assert that there are no values in need of formatting
         user_data = user_data.format()
     else:
         user_data = None
