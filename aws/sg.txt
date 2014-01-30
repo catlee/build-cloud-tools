@@ -2,8 +2,8 @@ tests:
     description: security group for test slaves
     regions:
         us-west-1: vpc-7a7dd613
-        #us-west-2: vpc-cd63f2a4
-        #us-east-1: vpc-b42100df
+        us-west-2: vpc-cd63f2a4
+        us-east-1: vpc-b42100df
     inbound:
         - proto: tcp
           ports: [22, 5900]
