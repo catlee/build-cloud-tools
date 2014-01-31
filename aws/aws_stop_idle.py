@@ -23,9 +23,30 @@ import requests
 import logging
 log = logging.getLogger()
 
+# Instances runnnig less than STOP_THRESHOLD_MINS minutes within 1 hour
+# boundary won't be stopped.
+STOP_THRESHOLD_MINS = 45
 
-def get_buildbot_instances(conn):
-    # Look for instances with moz-state=ready and hostname *-ec2-000
+
+def stop(i, ssh_client=None):
+    """Stop or destroy an instances depending on its type. Spot instances do
+    not support stop() method."""
+
+    name = i.tags.get("Name")
+    if ssh_client:
+        df = get_df(ssh_client, "/builds/slave")
+        log.info("DISK USAGE (M) for %s (%s): %s", name, i, df.strip())
+    # on-demand instances don't have instanceLifecycle attribute
+    if hasattr(i, "instanceLifecycle") and i.instanceLifecycle == "spot":
+        log.info("Terminating %s (%s)", name, i)
+        i.terminate()
+    else:
+        log.info("Stopping %s (%s)", name, i)
+        i.stop()
+
+
+def get_buildbot_instances(conn, moz_types):
+    # Look for running `moz_types` instances with moz-state=ready
     reservations = conn.get_all_instances(filters={
         'tag:moz-state': 'ready',
         'instance-state-name': 'running',
@@ -35,15 +56,15 @@ def get_buildbot_instances(conn):
     for r in reservations:
         for i in r.instances:
             name = i.tags['Name']
-            #if not re.match(".*-ec2-\d+", name):
-            if not re.match("tst-w64-ec2-\d+", name):
-                continue
-            retval.append(i)
+            #if i.tags.get("moz-type") in moz_types:
+            if re.match("tst-w64-ec2-\d+", name):
+                retval.append(i)
 
     return retval
 
 
 class IgnorePolicy:
+
     def missing_host_key(self, client, hostname, key):
         pass
 
@@ -67,7 +88,8 @@ def get_ssh_client(name, ip, credentials):
                 pass
                 #log.debug("Couldn't log into {name} at {ip} - {u} {p}".format(name=name, ip=ip, u=u, p=p), exc_info=True)
 
-    log.warning("Couldn't log into {name} at {ip} with any known passwords".format(name=name, ip=ip))
+    log.warning("Couldn't log into %s at %s with any known passwords",
+                name, ip)
     return None
 
 
@@ -106,19 +128,20 @@ def get_last_activity(name, client):
 
     if uptime < 3 * 60:
         # Assume we're still booting
-        log.debug("%s - uptime is %.2f; assuming we're still booting up" % (name, uptime))
+        log.debug("%s - uptime is %.2f; assuming we're still booting up", name,
+                  uptime)
         return "booting"
 
-    basedir = guess_basedir(name)
-
-    _, stdout = client.run_cmd("tail -n 50 {basedir}/twistd.log.1 {basedir}/twistd.log".format(basedir=basedir))
+    stdin, stdout, stderr = client.exec_command(
+        "tail -n 100 /builds/slave/twistd.log.1 /builds/slave/twistd.log")
+    stdin.close()
 
     last_activity = None
     running_command = False
     t = time.time()
     line = ""
-    for line in stdout.splitlines():
-        m = re.search("^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
+    for line in stdout:
+        m = re.search(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", line)
         if m:
             t = time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
             t = time.mktime(t)
@@ -137,9 +160,11 @@ def get_last_activity(name, client):
             running_command = False
 
         if "Shut Down" in line:
-            # Check if this happened before we booted, i.e. we're still booting up
+            # Check if this happened before we booted, i.e. we're still booting
+            # up
             if (slave_time - t) > uptime:
-                log.debug("%s - shutdown line is older than uptime; assuming we're still booting %s", name, line.strip())
+                log.debug(
+                    "%s - shutdown line is older than uptime; assuming we're still booting %s", name, line.strip())
                 last_activity = "booting"
             else:
                 last_activity = "stopped"
@@ -152,12 +177,15 @@ def get_last_activity(name, client):
 
     # If this was over 10 minutes ago
     if (slave_time - t) > 10 * 60 and (slave_time - t) > uptime:
-        log.warning("%s - shut down happened %ss ago, but we've been up for %ss - %s" % (name, slave_time - t, uptime, line.strip()))
-        # If longer than 30 minutes, stop the instance
+        log.warning(
+            "%s - shut down happened %ss ago, but we've been up for %ss - %s",
+            name, slave_time - t, uptime, line.strip())
+        # If longer than 30 minutes, try rebooting
         if (slave_time - t) > 30 * 60:
             return "stuck"
 
-    # If there's *no* activity (e.g. no twistd.log files), and we've been up a while, then stop
+    # If there's *no* activity (e.g. no twistd.log files), and we've been up a
+    # while, then reboot
     if last_activity is None and uptime > 15 * 60:
         log.warning("%s - no activity; stopping", name)
         return "stuck"
@@ -166,11 +194,20 @@ def get_last_activity(name, client):
     return last_activity
 
 
-def get_tacfile(name, client):
+def get_tacfile(client):
     basedir = guess_basedir(name)
-    #log.debug("getting tacfile from {basedir}/buildbot.tac".format(basedir=basedir))
-    _, stdout = client.run_cmd("cat {basedir}/buildbot.tac".format(basedir=basedir))
-    return stdout
+    stdin, stdout, stderr = client.exec_command(
+        "cat {basedir}/buildbot.tac".format(basedir=basedir))
+    stdin.close()
+    data = stdout.read()
+    return data
+
+
+def get_df(client, d):
+    stdin, stdout, stderr = client.exec_command("df -m %s | tail -n 1" % d)
+    stdin.close()
+    data = stdout.read()
+    return data
 
 
 def get_buildbot_master(name, client, masters_json):
@@ -191,12 +228,14 @@ def graceful_shutdown(name, ip, client, masters_json):
     log.debug("%s - looking up which master we're attached to", name)
     host, port = get_buildbot_master(name, client, masters_json)
 
-    url = "http://{host}:{port}/buildslaves/{name}/shutdown".format(host=host, port=port, name=name)
+    url = "http://{host}:{port}/buildslaves/{name}/shutdown".format(host=host,
+                                                                    port=port, name=name)
     log.debug("%s - POSTing to %s", name, url)
     requests.post(url, allow_redirects=False)
 
 
-def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=False):
+def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json,
+                           dryrun=False):
     "Returns True if stopped"
     name = i.tags['Name']
     log.debug("looking at %s", name)
@@ -205,24 +244,33 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=Fa
     ip = i.private_ip_address
     ssh_client = get_ssh_client(name, ip, credentials)
     stopped = False
+    launch_time = calendar.timegm(time.strptime(
+        i.launch_time[:19], '%Y-%m-%dT%H:%M:%S'))
     if not ssh_client:
         if i.id in impaired_ids:
-            launch_time = calendar.timegm(time.strptime(
-                i.launch_time[:19], '%Y-%m-%dT%H:%M:%S'))
             if time.time() - launch_time > 60 * 10:
                 stopped = True
                 if not dryrun:
-                    log.warning("%s - shut down an instance with impaired status" % name)
-                    i.stop()
+                    log.warning(
+                        "%s - shut down an instance with impaired status", name)
+                    stop(i)
                 else:
                     log.info("%s - would have stopped", name)
         return stopped
+
+    # skip instances running not close to 1hr boundary
+    uptime_min = int((time.time() - launch_time) / 60)
+    if uptime_min % 60 < STOP_THRESHOLD_MINS:
+        log.debug("Skipping %s, with uptime %s", name, uptime_min)
+        return False
+
     last_activity = get_last_activity(name, ssh_client)
     if last_activity in ("stopped", "stuck"):
         stopped = True
         if not dryrun:
-            log.info("%s - stopping instance (launched %s)", name, i.launch_time)
-            i.stop()
+            log.info("%s - stopping instance (launched %s)", name,
+                     i.launch_time)
+            stop(i, ssh_client)
         else:
             log.info("%s - would have stopped", name)
         return stopped
@@ -231,7 +279,7 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=Fa
         # Wait harder
         return stopped
 
-    log.debug("%s - last activity %s ago", name, last_activity)
+    log.debug("%s - last activity %s", name, last_activity)
     # Determine if the machine is idle for more than 10 minutes
     if last_activity > 300:
         if not dryrun:
@@ -242,10 +290,11 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=Fa
             # Check if we've exited right away
             if get_last_activity(name, ssh_client) == "stopped":
                 log.debug("%s - stopping instance", name)
-                i.stop()
+                stop(i, ssh_client)
                 stopped = True
             else:
-                log.info("%s - not stopping, waiting for graceful shutdown", name)
+                log.info(
+                    "%s - not stopping, waiting for graceful shutdown", name)
         else:
             log.info("%s - would have started graceful shutdown", name)
             stopped = True
@@ -254,7 +303,8 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json, dryrun=Fa
     return stopped
 
 
-def aws_stop_idle(secrets, credentials, regions, masters_json, dryrun=False, concurrency=8):
+def aws_stop_idle(secrets, credentials, regions, masters_json, moz_types,
+                  dryrun=False, concurrency=8):
     if not regions:
         # Look at all regions
         log.debug("loading all regions")
@@ -269,7 +319,7 @@ def aws_stop_idle(secrets, credentials, regions, masters_json, dryrun=False, con
         log.debug("looking at region %s", r)
         conn = boto.ec2.connect_to_region(r, **secrets)
 
-        instances = get_buildbot_instances(conn)
+        instances = get_buildbot_instances(conn, moz_types)
         impaired = conn.get_all_instance_status(
             filters={'instance-status.status': 'impaired'})
         impaired_ids.extend(i.id for i in impaired)
@@ -277,14 +327,16 @@ def aws_stop_idle(secrets, credentials, regions, masters_json, dryrun=False, con
         for i in instances:
             # TODO: Check if launch_time is too old, and terminate the instance
             # if it is
-            # NB can't turn this on until aws_create_instance is working properly (with ssh keys)
+            # NB can't turn this on until aws_create_instance is working
+            # properly (with ssh keys)
             instances_by_type.setdefault(i.tags['moz-type'], []).append(i)
 
         # Make sure min_running_by_type are kept running
         for t in instances_by_type:
             to_remove = instances_by_type[t][:min_running_by_type]
             for i in to_remove:
-                log.debug("%s - keep running (min %i instances of type %s)", i.tags['Name'], min_running_by_type, i.tags['moz-type'])
+                log.debug("%s - keep running (min %s instances of type %s)",
+                          i.tags['Name'], min_running_by_type, i.tags['moz-type'])
                 instances.remove(i)
 
         all_instances.extend(instances)
@@ -344,7 +396,7 @@ def aws_stop_idle(secrets, credentials, regions, masters_json, dryrun=False, con
         total_stopped[t] += 1
 
     for t, c in sorted(total_stopped.items()):
-        log.info("%s - stopped %i" % (t, c))
+        log.info("%s - stopped %s", t, c)
 
 if __name__ == '__main__':
     import argparse
@@ -359,10 +411,14 @@ if __name__ == '__main__':
                         default=logging.INFO)
     parser.add_argument("-c", "--credentials", type=argparse.FileType('r'),
                         required=True)
+    parser.add_argument("-t", "--moz-type", action="append", dest="moz_types",
+                        required=True, help="moz-type tag values to be checked")
     parser.add_argument("-j", "--concurrency", type=int, default=8)
-    parser.add_argument("--masters-json", default="http://hg.mozilla.org/build/tools/raw-file/default/buildfarm/maintenance/production-masters.json")
+    parser.add_argument("--masters-json",
+                        default="http://hg.mozilla.org/build/tools/raw-file/default/buildfarm/maintenance/production-masters.json")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("-l", "--logfile", dest="logfile", help="log file for full debug log")
+    parser.add_argument("-l", "--logfile", dest="logfile",
+                        help="log file for full debug log")
 
     args = parser.parse_args()
 
@@ -379,7 +435,8 @@ if __name__ == '__main__':
     logging.getLogger().addHandler(handler)
 
     if args.logfile:
-        handler = logging.handlers.RotatingFileHandler(args.logfile, maxBytes=10 * (1024 ** 2), backupCount=100)
+        handler = logging.handlers.RotatingFileHandler(
+            args.logfile, maxBytes=10 * (1024 ** 2), backupCount=100)
         handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         logging.getLogger().addHandler(handler)
@@ -396,5 +453,6 @@ if __name__ == '__main__':
         masters_json = requests.get(args.masters_json).json()
 
     aws_stop_idle(secrets, credentials, args.regions, masters_json,
-                  dryrun=args.dry_run, concurrency=args.concurrency)
+                  args.moz_types, dryrun=args.dry_run,
+                  concurrency=args.concurrency)
     log.debug("done")

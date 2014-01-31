@@ -13,8 +13,12 @@ from fabric.api import run, put, env, sudo
 from fabric.context_managers import cd
 from boto.ec2 import connect_to_region
 from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
+from boto.ec2.networkinterface import NetworkInterfaceSpecification, \
+    NetworkInterfaceCollection
 from boto.vpc import VPCConnection
 from IPy import IP
+
+from aws_create_ami import AMI_CONFIGS_DIR
 
 import logging
 log = logging.getLogger()
@@ -104,8 +108,9 @@ def assimilate(instance, config, instance_data, deploypass):
     # We do this because the AMI image usually has a smaller filesystem than
     # the instance has.
     if 'device_map' in config:
-        for mapping in config['device_map'].values():
-            run('resize2fs {dev}'.format(dev=mapping['instance_dev']))
+        for device, mapping in config['device_map'].items():
+            if not mapping.get("skip_resize"):
+                run('resize2fs {dev}'.format(dev=mapping['instance_dev']))
 
     # Set up /etc/hosts to talk to 'puppet'
     hosts = ['127.0.0.1 %s localhost' % hostname,
@@ -114,18 +119,22 @@ def assimilate(instance, config, instance_data, deploypass):
     put(hosts, '/etc/hosts')
 
     if distro in ('ubuntu', 'debian'):
-        put('releng.list', '/etc/apt/sources.list')
+        put('%s/releng-public.list' % AMI_CONFIGS_DIR, '/etc/apt/sources.list')
         run("apt-get update")
         run("apt-get install -y --allow-unauthenticated puppet")
         run("apt-get clean")
     else:
         # Set up yum repos
         run('rm -f /etc/yum.repos.d/*')
-        put('releng-public.repo', '/etc/yum.repos.d/releng-public.repo')
+        put('%s/releng-public.repo' % AMI_CONFIGS_DIR,
+            '/etc/yum.repos.d/releng-public.repo')
         run('yum clean all')
-        run('yum install -q -y puppet')
+        run('yum install -q -y lvm-init puppet')
+        lvm_init_cfg = StringIO.StringIO(json.dumps(config))
+        put(lvm_init_cfg, "/etc/lvm-init/lvm-init.json")
+        run("/sbin/lvm-init")
 
-    run("wget -O /root/puppetize.sh https://hg.mozilla.org/build/puppet/raw-file/default/modules/puppet/files/puppetize.sh")
+    run("wget -O /root/puppetize.sh https://hg.mozilla.org/build/puppet/raw-file/production/modules/puppet/files/puppetize.sh")
     run("chmod 755 /root/puppetize.sh")
     put(StringIO.StringIO(deploypass), "/root/deploypass")
     put(StringIO.StringIO("exit 0\n"), "/root/post-puppetize-hook.sh")
@@ -152,7 +161,7 @@ def assimilate(instance, config, instance_data, deploypass):
             target_dir = '/builds/hg-shared/%s' % share
             sudo('rm -rf {d} && mkdir -p {d}'.format(d=target_dir), user="cltbld")
             sudo('{hg} init {d}'.format(hg=hg, d=target_dir), user="cltbld")
-            hgrc = "[path]\n"
+            hgrc = "[paths]\n"
             hgrc += "default = http://hg.mozilla.org/%s\n" % share
             put(StringIO.StringIO(hgrc), '%s/.hg/hgrc' % target_dir)
             run("chown cltbld: %s/.hg/hgrc" % target_dir)
@@ -189,8 +198,15 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
     if 'device_map' in config:
         bdm = BlockDeviceMapping()
         for device, device_info in config['device_map'].items():
-            bdm[device] = BlockDeviceType(size=device_info['size'],
-                                          delete_on_termination=True)
+            bd = BlockDeviceType()
+            if device_info.get('size'):
+                bd.size = device_info['size']
+            if device_info.get("delete_on_termination") is not False:
+                bd.delete_on_termination = True
+            if device_info.get("ephemeral_name"):
+                bd.ephemeral_name = device_info["ephemeral_name"]
+
+            bdm[device] = bd
 
     ip_address = get_ip(instance_data['hostname'])
     subnet_id = None
@@ -207,6 +223,13 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
     if not ip_address or not subnet_id:
         ip_address = None
         subnet_id = choice(config.get('subnet_ids'))
+    interface = NetworkInterfaceSpecification(
+        subnet_id=subnet_id, private_ip_address=ip_address,
+        delete_on_termination=True,
+        groups=config.get('security_group_ids', []),
+        associate_public_ip_address=config.get("use_public_ip")
+    )
+    interfaces = NetworkInterfaceCollection(interface)
 
     while True:
         try:
@@ -230,12 +253,11 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
                 instance_type=config['instance_type'],
                 block_device_map=bdm,
                 client_token=token,
-                subnet_id=subnet_id,
-                private_ip_address=ip_address,
                 disable_api_termination=bool(config.get('disable_api_termination')),
                 security_group_ids=config.get('security_group_ids', []),
                 user_data=user_data,
                 instance_profile_name=config.get('instance_profile_name'),
+                network_interfaces=interfaces,
             )
             break
         except boto.exception.BotoServerError:
@@ -387,7 +409,7 @@ if __name__ == '__main__':
 
     secrets = json.load(args.secrets)
     # TODO: Not required for windows
-    deploypass = getpass.getpass("Enter deploy password:").strip()
+    deploypass = getpass.getpass("Enter puppetagain deploy password:").strip()
 
     instance_data = json.load(args.instance_data)
     if args.instance_id:

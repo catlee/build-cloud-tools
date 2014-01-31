@@ -1,0 +1,3 @@
+{
+  "puppet_masters": ["servo-puppet1.srv.servo.releng.use1.mozilla.com"]
+}

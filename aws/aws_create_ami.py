@@ -8,9 +8,11 @@ import json
 import uuid
 import time
 import logging
+import os
 log = logging.getLogger()
 
-AM_CONFIGS_DIR = "ami_configs"
+AMI_CONFIGS_DIR = "ami_configs"
+INSTANCE_CONFIGS_DIR = "configs"
 
 
 def create_connection(options):
@@ -31,7 +33,8 @@ def manage_service(service, target, state, distro="centos"):
         run('chroot %s chkconfig --level 2345 %s %s' % (target, service, state))
 
 
-def create_instance(connection, instance_name, config, key_name, user='root'):
+def create_instance(connection, instance_name, config, key_name, user='root',
+                    subnet_id=None):
 
     bdm = None
     if 'device_map' in config:
@@ -46,6 +49,7 @@ def create_instance(connection, instance_name, config, key_name, user='root'):
         instance_type=config['instance_type'],
         block_device_map=bdm,
         client_token=str(uuid.uuid4())[:16],
+        subnet_id=subnet_id,
     )
 
     instance = reservation.instances[0]
@@ -55,7 +59,10 @@ def create_instance(connection, instance_name, config, key_name, user='root'):
         try:
             instance.update()
             if instance.state == 'running':
-                env.host_string = instance.public_dns_name
+                if subnet_id:
+                    env.host_string = instance.private_ip_address
+                else:
+                    env.host_string = instance.public_dns_name
                 env.user = user
                 env.abort_on_prompts = True
                 env.disable_known_hosts = True
@@ -67,7 +74,12 @@ def create_instance(connection, instance_name, config, key_name, user='root'):
     instance.add_tag('Name', instance_name)
     # Overwrite root's limited authorized_keys
     if user != 'root':
-        sudo('cp -f ~%s/.ssh/authorized_keys /root/.ssh/authorized_keys' % user)
+        sudo("cp -f ~%s/.ssh/authorized_keys "
+             "/root/.ssh/authorized_keys" % user)
+        sudo("sed -i -e '/PermitRootLogin/d' "
+             "-e '$ a PermitRootLogin without-password' /etc/ssh/sshd_config")
+        sudo("service sshd restart")
+        sudo("sleep 20")
     return instance
 
 
@@ -79,10 +91,12 @@ def create_ami(host_instance, options, config):
     env.disable_known_hosts = True
 
     target_name = options.config
-    config_dir = "%s/%s" % (AM_CONFIGS_DIR, target_name)
+    virtualization_type = config.get("virtualization_type")
+    config_dir = "%s/%s" % (AMI_CONFIGS_DIR, target_name)
     dated_target_name = "%s-%s" % (
         options.config, time.strftime("%Y-%m-%d-%H-%M", time.gmtime()))
     int_dev_name = config['target']['int_dev_name']
+    mount_dev = int_dev_name
     mount_point = config['target']['mount_point']
 
     v = connection.create_volume(config['target']['size'],
@@ -107,15 +121,22 @@ def create_ami(host_instance, options, config):
 
     # Step 0: install required packages
     if config.get('distro') not in ('debian', 'ubuntu'):
-        run('which MAKEDEV >/dev/null || yum install -f MAKEDEV')
+        run('which MAKEDEV >/dev/null || yum install -y MAKEDEV')
     # Step 1: prepare target FS
-    run('/sbin/mkfs.{fs_type} {dev}'.format(
-        fs_type=config['target']['fs_type'],
-        dev=int_dev_name))
-    run('/sbin/e2label {dev} {label}'.format(
-        dev=int_dev_name, label=config['target']['e2_label']))
     run('mkdir -p %s' % mount_point)
-    run('mount {dev} {mount_point}'.format(dev=int_dev_name,
+    if virtualization_type == "hvm":
+        # HVM based instances use EBS disks as raw disks. They are have to be
+        # partitioned first. Additionally ,"1" should the appended to get the
+        # first primary device name.
+        mount_dev = "%s1" % mount_dev
+        run('parted -s %s -- mklabel msdos' % int_dev_name)
+        run('parted -s -a optimal %s -- mkpart primary ext2 0 -1s' % int_dev_name)
+        run('parted -s %s -- set 1 boot on' % int_dev_name)
+    run('/sbin/mkfs.{fs_type} {dev}'.format(
+        fs_type=config['target']['fs_type'], dev=mount_dev))
+    run('/sbin/e2label {dev} {label}'.format(
+        dev=mount_dev, label=config['target']['e2_label']))
+    run('mount {dev} {mount_point}'.format(dev=mount_dev,
                                            mount_point=mount_point))
     run('mkdir {0}/dev {0}/proc {0}/etc'.format(mount_point))
     if config.get('distro') not in ('debian', 'ubuntu'):
@@ -130,7 +151,7 @@ def create_ami(host_instance, options, config):
         run('debootstrap precise %s http://puppetagain.pub.build.mozilla.org/data/repos/apt/ubuntu/' % mount_point)
         run('chroot %s mount -t proc none /proc' % mount_point)
         run('mount -o bind /dev %s/dev' % mount_point)
-        put('releng-public.list', '%s/etc/apt/sources.list' % mount_point)
+        put('%s/releng-public.list' % AMI_CONFIGS_DIR, '%s/etc/apt/sources.list' % mount_point)
         with lcd(config_dir):
             put('usr/sbin/policy-rc.d', '%s/usr/sbin/' % mount_point, mirror_local_mode=True)
         run('chroot %s apt-get update' % mount_point)
@@ -153,22 +174,22 @@ def create_ami(host_instance, options, config):
         run('%s groupinstall "`cat /tmp/groupinstall`"' % yum)
         run('%s install `cat /tmp/additional_packages`' % yum)
         run('%s clean packages' % yum)
+        # Rebuild RPM DB for cases when versions mismatch
+        run('chroot %s rpmdb --rebuilddb || :' % mount_point)
 
     # Step 3: upload custom configuration files
     run('chroot %s mkdir -p /boot/grub' % mount_point)
-    if config.get('distro') in ('debian', 'ubuntu'):
-        with lcd(config_dir):
-            for f in ('etc/rc.local', 'etc/fstab', 'etc/hosts',
-                      'etc/network/interfaces', 'boot/grub/menu.lst'):
+    with lcd(config_dir):
+        for f in ('etc/rc.local', 'etc/fstab', 'etc/hosts',
+                  'etc/sysconfig/network',
+                  'etc/sysconfig/network-scripts/ifcfg-eth0',
+                  'etc/init.d/rc.local', 'boot/grub/device.map',
+                  'etc/network/interfaces', 'boot/grub/menu.lst',
+                  'boot/grub/grub.conf'):
+            if os.path.exists(os.path.join(config_dir, f)):
                 put(f, '%s/%s' % (mount_point, f), mirror_local_mode=True)
-    else:
-        with lcd(config_dir):
-            for f in ('etc/rc.local', 'etc/fstab', 'etc/hosts',
-                    'etc/sysconfig/network',
-                    'etc/sysconfig/network-scripts/ifcfg-eth0',
-                    'etc/init.d/rc.local',
-                    'boot/grub/grub.conf'):
-                put(f, '%s/%s' % (mount_point, f), mirror_local_mode=True)
+            else:
+                log.warn("Skipping %s", f)
 
     # Step 4: tune configs
     run('sed -i -e s/@ROOT_DEV_LABEL@/{label}/g -e s/@FS_TYPE@/{fs}/g '
@@ -193,10 +214,21 @@ def create_ami(host_instance, options, config):
                 '--queryformat "%%{version}-%%{release}.%%{arch}" '
                 '%s | tail -n1`/g %s/boot/grub/grub.conf' %
                 (mount_point, config.get('kernel_package', 'kernel'), mount_point))
+        if virtualization_type == "hvm":
+            # See https://bugs.archlinux.org/task/30241 for the details,
+            # grub-nstall doesn't handle /dev/xvd* devices properly
+            grub_install_patch = os.path.join(config_dir, "grub-install.diff")
+            if os.path.exists(grub_install_patch):
+                put(grub_install_patch, "/tmp/grub-install.diff")
+                run('which patch >/dev/null || yum install -y patch')
+                run('patch -p0 -i /tmp/grub-install.diff /sbin/grub-install')
+            run("grub-install --root-directory=%s --no-floppy %s" %
+                (mount_point, int_dev_name))
 
-    run('echo "UseDNS no" >> %s/etc/ssh/sshd_config' % mount_point)
-    run('echo "PermitRootLogin without-password" >> %s/etc/ssh/sshd_config' %
-        mount_point)
+    run("sed -i -e '/PermitRootLogin/d' -e '/UseDNS/d' "
+        "-e '$ a PermitRootLogin without-password' "
+        "-e '$ a UseDNS no' "
+        "%s/etc/ssh/sshd_config" % mount_point)
 
     if config.get('distro') in ('debian', 'ubuntu'):
         pass
@@ -236,19 +268,31 @@ def create_ami(host_instance, options, config):
     block_map = BlockDeviceMapping()
     block_map[host_img.root_device_name] = BlockDeviceType(
         snapshot_id=snapshot.id)
+    if virtualization_type == "hvm":
+        kernel_id = None
+        ramdisk_id = None
+    else:
+        kernel_id = host_img.kernel_id
+        ramdisk_id = host_img.ramdisk_id
+
     ami_id = connection.register_image(
         dated_target_name,
         '%s EBS AMI' % dated_target_name,
         architecture=config['arch'],
-        kernel_id=host_img.kernel_id,
-        ramdisk_id=host_img.ramdisk_id,
+        kernel_id=kernel_id,
+        ramdisk_id=ramdisk_id,
         root_device_name=host_img.root_device_name,
         block_device_map=block_map,
+        virtualization_type=virtualization_type,
     )
     while True:
         try:
             ami = connection.get_image(ami_id)
             ami.add_tag('Name', dated_target_name)
+            if config["target"].get("tags"):
+                for tag, value in config["target"]["tags"].items():
+                    log.info("Tagging %s: %s", tag, value)
+                    ami.add_tag(tag, value)
             log.info('AMI created')
             log.info('ID: {id}, name: {name}'.format(id=ami.id, name=ami.name))
             break
@@ -308,7 +352,7 @@ if __name__ == '__main__':
         parser.error("SSH key name name is required")
 
     try:
-        config = json.load(open("%s/%s.json" % (AM_CONFIGS_DIR,
+        config = json.load(open("%s/%s.json" % (AMI_CONFIGS_DIR,
                                                 options.config)))[options.region]
     except KeyError:
         parser.error("unknown configuration")
