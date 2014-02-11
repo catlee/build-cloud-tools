@@ -15,6 +15,8 @@ import logging
 import boto
 from boto.ec2 import connect_to_region
 from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
+from boto.ec2.networkinterface import NetworkInterfaceSpecification, \
+     NetworkInterfaceCollection
 log = logging.getLogger()
 
 AM_CONFIGS_DIR = "ami_configs"
@@ -60,17 +62,24 @@ def create_instance(connection, instance_name, config, key_name):
 
     subnet_id = random.choice(config.get('subnet_ids'))
 
+    interface = NetworkInterfaceSpecification(
+        subnet_id=subnet_id,
+        delete_on_termination=True,
+        groups=config.get('security_group_ids', []),
+        associate_public_ip_address=config.get("use_public_ip")
+    )
+    interfaces = NetworkInterfaceCollection(interface)
+
     reservation = connection.run_instances(
         image_id=config['ami'],
         key_name=key_name,
         instance_type=config['instance_type'],
         block_device_map=bdm,
         client_token=str(uuid.uuid4())[:16],
-        subnet_id=subnet_id,
         disable_api_termination=bool(config.get('disable_api_termination')),
-        security_group_ids=config.get('security_group_ids', []),
         user_data=user_data,
         instance_profile_name=config.get('instance_profile_name'),
+        network_interfaces=interfaces,
     )
 
     instance = reservation.instances[0]
