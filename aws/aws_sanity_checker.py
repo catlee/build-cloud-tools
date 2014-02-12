@@ -96,6 +96,27 @@ def get_bad_state(instances):
     return bad_state
 
 
+def get_loaned(instances):
+    ret = []
+    loaned = [i for i in instances if i.tags.get("moz-loaned-to")]
+    for i in loaned:
+        bug_string = "an unknown bug"
+        if i.tags.get("moz-bug"):
+            bug_string = "bug %s" % i.tags.get("moz-bug")
+        if i.state == "running":
+            uptime = get_uptime(i)
+            ret.append((uptime, i, "Loaned to %s in %s, up for %i hours" % (
+                i.tags["moz-loaned-to"], bug_string, uptime)))
+        else:
+            ret.append((None, i, "Loaned to %s in %s, %s" % (i.tags["moz-loaned-to"],
+                                                             bug_string,
+                                                             i.state)))
+    if ret:
+        # sort by uptime, reconstruct ret
+        ret = [(e[1], e[2]) for e in reversed(sorted(ret, key=lambda x: x[0]))]
+    return ret
+
+
 def get_uptime(instance):
     return (time.time() - parse_launch_time(instance.launch_time)) / 3600
 
@@ -109,6 +130,10 @@ def get_stale(instances, expected_stale_time, running_only=True):
         else:
             if i.state != "stopped":
                 continue
+
+        # Ignore Loaned (we have a separate section in report for that)
+        if i.tags.get("moz-loaned-to"):
+            continue
 
         uptime = get_uptime(i)
         moz_type = i.tags.get('moz-type', 'default')
@@ -138,10 +163,15 @@ def instance_sanity_check(instances):
     long_stopped = get_stale(instances=instances,
                              expected_stale_time=EXPECTED_MAX_DOWNTIME,
                              running_only=False)
+    loaned = get_loaned(instances)
     if long_running:
         print "==== Long running instances ===="
         format_instance_list(sorted(long_running, reverse=True,
                                     key=lambda x: get_uptime(x[0])))
+        print
+    if loaned:
+        print "==== Loaned ===="
+        format_instance_list(loaned)
         print
     if bad_type:
         print "==== Instances with unknown type ===="
@@ -178,12 +208,15 @@ def volume_sanity_check(volumes):
         print
 
 
-def instance_stats(instances):
+def instance_stats(instances, regions):
     states = collections.defaultdict(int)
     types = collections.defaultdict(list)
     type_regexp = re.compile(r"(.*?)-?\d+$")
+    state = {}
+    for r in regions:
+        states[r] = collections.defaultdict(int)
     for i in instances:
-        states[i.state] += 1
+        states[i.region.name][i.state] += 1
         name = i.tags.get("Name")
         # Try to remove trailing digits or use the whole name
         if name:
@@ -199,8 +232,10 @@ def instance_stats(instances):
         types[type_name].append(running)
 
     print "==== %s instances in total ====" % len(instances)
-    for state, n in states.iteritems():
-        print "%s: %s" % (state, n)
+    for r in sorted(regions):
+        print r
+        for state, n in states[r].iteritems():
+            print "  %s: %s" % (state, n)
     print
     print "==== Type breakdown ===="
     # Sort by amount of running instances
@@ -240,6 +275,6 @@ if __name__ == '__main__':
         conn = get_connection(region, secrets)
         all_instances.extend(get_all_instances(conn))
         all_volumes.extend(conn.get_all_volumes())
-    instance_stats(all_instances)
+    instance_stats(all_instances, args.regions)
     instance_sanity_check(all_instances)
     volume_sanity_check(all_volumes)

@@ -12,10 +12,10 @@
         "^Linux.* nightly": "bld-linux64",
         "^Linux.* valgrind": "bld-linux64",
         "^Linux.* try.*build": "try-linux64",
-        "^b2g_(?!try)\\S+_(unagi|panda|otoro|leo|inari|hamachi|emulator|emulator-debug|emulator-jb|emulator-jb-debug|helix|leo|nexus-4|wasabi)(_eng)?_(dep|nightly|periodic)": "bld-linux64",
-        "^b2g_try_(emulator|emulator-debug|emulator-jb-debug|emulator-jb-debug)_(dep|nightly)": "try-linux64",
+        "^b2g_(?!try)\\S+_(unagi|panda|otoro|leo|inari|hamachi|emulator|helix|leo|leo_eng)_(dep|nightly)": "bld-linux64",
+        "^b2g_try_(unagi|panda|otoro|leo|inari|hamachi|emulator)_(dep|nightly)": "try-linux64",
         "^b2g_(?!try)\\S+_linux(32|64)_gecko(-debug)?": "bld-linux64",
-        "^b2g_try_linux(32|64)_gecko(-debug)?": "try-linux64",
+        "^b2g_try\\S+_linux(32|64)_gecko(-debug)?": "try-linux64",
         "^Ubuntu VM 12.04 (?!x64).*": "tst-linux32",
         "^Ubuntu VM 12.04 x64.*": "tst-linux64",
         "^Ubuntu ASAN VM 12.04 x64.*": "tst-linux64"
@@ -23,47 +23,47 @@
     "spot_limits": {
         "us-east-1": {
             "tst-linux64": {
-                "instance_type": "m1.medium",
+                "instance_type": "m3.medium",
                 "instances": 200,
-                "price": "0.09"
+                "price": "0.10"
             },
             "tst-linux32": {
                 "instance_type": "m1.medium",
                 "instances": 200,
                 "price": "0.10"
             },
-            "bld-linux64": {
-                "instance_type": "m3.xlarge",
-                "instances": 1,
-                "price": "0.25"
-            },
             "try-linux64": {
                 "instance_type": "m3.xlarge",
                 "instances": 200,
-                "price": "0.25"
+                "price": "0.40"
             }
         },
         "us-west-2": {
             "tst-linux64": {
-                "instance_type": "m1.medium",
+                "instance_type": "m3.medium",
                 "instances": 200,
-                "price": "0.09"
+                "price": "0.10"
             },
             "tst-linux32": {
                 "instance_type": "m1.medium",
                 "instances": 200,
                 "price": "0.10"
             },
-            "bld-linux64": {
-                "instance_type": "m3.xlarge",
-                "instances": 1,
-                "price": "0.25"
-            },
             "try-linux64": {
                 "instance_type": "m3.xlarge",
                 "instances": 200,
-                "price": "0.25"
+                "price": "0.40"
             }
+        }
+    },
+    "instance_type_changes": {
+        "us-east-1": {
+            "bld-linux64": "m3.xlarge",
+            "try-linux64": "m3.xlarge"
+        },
+        "us-west-2": {
+            "bld-linux64": "m3.xlarge",
+            "try-linux64": "m3.xlarge"
         }
     }
 }

@@ -9,9 +9,11 @@
         "instance_type": "m1.medium",
         "distro": "ubuntu",
         "ssh_key": "aws-releng",
+        "use_public_ip": true,
+        "instance_profile_name": "tst-linux32",
         "device_map": {
             "/dev/sda1": {
-                "size": 30,
+                "size": 15,
                 "instance_dev": "/dev/xvda1"
             }
         },
@@ -28,9 +30,11 @@
         "instance_type": "m1.medium",
         "distro": "ubuntu",
         "ssh_key": "aws-releng",
+        "use_public_ip": true,
+        "instance_profile_name": "tst-linux32",
         "device_map": {
             "/dev/sda1": {
-                "size": 30,
+                "size": 15,
                 "instance_dev": "/dev/xvda1"
             }
         },

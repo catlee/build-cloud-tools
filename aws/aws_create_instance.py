@@ -4,7 +4,7 @@ import uuid
 import time
 import boto
 import StringIO
-from socket import gethostbyname, gaierror
+from socket import gethostbyname, gaierror, gethostbyaddr, herror
 import getpass
 import random
 
@@ -21,13 +21,22 @@ from IPy import IP
 from aws_create_ami import AMI_CONFIGS_DIR
 
 import logging
-log = logging.getLogger()
+log = logging.getLogger(__name__)
+_connections = {}
+_vpcs = {}
 
 
 def get_ip(hostname):
     try:
         return gethostbyname(hostname)
     except gaierror:
+        return None
+
+
+def get_ptr(ip):
+    try:
+        return gethostbyaddr(ip)[0]
+    except herror:
         return None
 
 
@@ -49,6 +58,59 @@ def ip_available(conn, ip):
         return True
 
 
+def name_available(conn, name):
+    res = conn.get_all_instances()
+    instances = reduce(lambda a, b: a + b, [r.instances for r in res])
+    names = [i.tags.get("Name") for i in instances if i.state != "terminated"]
+    if name in names:
+        return False
+    else:
+        return True
+
+
+def verify(hosts, config, region, secrets):
+    """ Check DNS entries and IP availability for hosts"""
+    passed = True
+    conn = get_connection(
+        region,
+        aws_access_key_id=secrets['aws_access_key_id'],
+        aws_secret_access_key=secrets['aws_secret_access_key']
+    )
+    for host in hosts:
+        fqdn = "%s.%s" % (host, config["domain"])
+        log.info("Checking name conflicts for %s", host)
+        if not name_available(conn, host):
+            log.error("%s has been already taken", host)
+            passed = False
+            continue
+        log.debug("Getting IP for %s", fqdn)
+        ip = get_ip(fqdn)
+        if not ip:
+            log.error("%s has no DNS entry", fqdn)
+            passed = False
+        else:
+            log.debug("Getting PTR for %s", fqdn)
+            ptr = get_ptr(ip)
+            if ptr != fqdn:
+                log.error("Bad PTR for %s", host)
+                passed = False
+            log.debug("Checking %s availablility", ip)
+            if not ip_available(conn, ip):
+                log.error("IP %s reserved for %s, but not available", ip, host)
+                passed = False
+            vpc = get_vpc(
+                connection=conn,
+                aws_access_key_id=secrets['aws_access_key_id'],
+                aws_secret_access_key=secrets['aws_secret_access_key'])
+
+            s_id = get_subnet_id(vpc, ip)
+            if s_id not in config['subnet_ids']:
+                log.error("IP %s does not belong to assigned subnets", ip)
+                passed = False
+    if not passed:
+        raise RuntimeError("Sanity check failed")
+
+
 def assimilate(ip_addr, config, instance_data, deploypass):
     """Assimilate hostname into our collective
 
@@ -67,6 +129,7 @@ def assimilate(ip_addr, config, instance_data, deploypass):
     distro = config.get('distro')
     # Set our hostname
     hostname = "{hostname}".format(**instance_data)
+    log.info("Bootstrapping %s...", hostname)
     run("hostname %s" % hostname)
     if distro in ('ubuntu', 'debian'):
         run("echo %s > /etc/hostname" % hostname)
@@ -107,6 +170,7 @@ def assimilate(ip_addr, config, instance_data, deploypass):
     put(StringIO.StringIO("exit 0\n"), "/root/post-puppetize-hook.sh")
 
     puppet_master = random.choice(instance_data["puppet_masters"])
+    log.info("Puppetizing %s, it may take a while...", hostname)
     run("PUPPET_SERVER=%s /root/puppetize.sh" % puppet_master)
 
     if 'home_tarball' in instance_data:
@@ -123,32 +187,59 @@ def assimilate(ip_addr, config, instance_data, deploypass):
              "{buildbot_master} {name} "
              "{buildslave_password}".format(**instance_data), user="cltbld")
     if instance_data.get("hg_shares"):
+        log.info("Cloning HG repos for %s...", hostname)
         hg = "/tools/python27-mercurial/bin/hg"
         for share, bundle in instance_data['hg_shares'].iteritems():
             target_dir = '/builds/hg-shared/%s' % share
-            sudo('rm -rf {d} && mkdir -p {d}'.format(d=target_dir), user="cltbld")
+            sudo('rm -rf {d} && mkdir -p {d}'.format(d=target_dir),
+                 user="cltbld")
             sudo('{hg} init {d}'.format(hg=hg, d=target_dir), user="cltbld")
             hgrc = "[paths]\n"
-            hgrc += "default = http://hg.mozilla.org/%s\n" % share
+            hgrc += "default = https://hg.mozilla.org/%s\n" % share
             put(StringIO.StringIO(hgrc), '%s/.hg/hgrc' % target_dir)
             run("chown cltbld: %s/.hg/hgrc" % target_dir)
             sudo('{hg} -R {d} unbundle {b}'.format(hg=hg, d=target_dir,
                                                    b=bundle), user="cltbld")
 
+    log.info("Rebooting %s...", hostname)
     run("reboot")
 
 
+def get_connection(region, aws_access_key_id, aws_secret_access_key):
+    global _connections
+    if _connections.get(region):
+        return _connections[region]
+    _connections[region] = connect_to_region(
+        region,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key
+    )
+    return _connections[region]
+
+
+def get_vpc(connection, aws_access_key_id, aws_secret_access_key):
+    global _vpcs
+    if _vpcs.get(connection.region.name):
+        return _vpcs[connection.region.name]
+    _vpcs[connection.region.name] = VPCConnection(
+        region=connection.region,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key
+    )
+    return _vpcs[connection.region.name]
+
+
 def create_instance(name, config, region, secrets, key_name, instance_data,
-                    deploypass):
+                    deploypass, loaned_to, loan_bug):
     """Creates an AMI instance with the given name and config. The config must
     specify things like ami id."""
-    conn = connect_to_region(
+    conn = get_connection(
         region,
         aws_access_key_id=secrets['aws_access_key_id'],
         aws_secret_access_key=secrets['aws_secret_access_key']
     )
-    vpc = VPCConnection(
-        region=conn.region,
+    vpc = get_vpc(
+        connection=conn,
         aws_access_key_id=secrets['aws_access_key_id'],
         aws_secret_access_key=secrets['aws_secret_access_key'])
 
@@ -160,6 +251,7 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
     instance_data['hostname'] = '{name}.{domain}'.format(
         name=name, domain=config['domain'])
 
+    ami = conn.get_all_images(image_ids=[config["ami"]])[0]
     bdm = None
     if 'device_map' in config:
         bdm = BlockDeviceMapping()
@@ -167,6 +259,11 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
             bd = BlockDeviceType()
             if device_info.get('size'):
                 bd.size = device_info['size']
+            # Overwrite root device size for HVM instances, since they cannot
+            # be resized online
+            if ami.virtualization_type == "hvm" and \
+                    ami.root_device_name == device:
+                bd.size = ami.block_device_mapping[ami.root_device_name].size
             if device_info.get("delete_on_termination") is not False:
                 bd.delete_on_termination = True
             if device_info.get("ephemeral_name"):
@@ -185,7 +282,6 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
             else:
                 log.warning("%s already assigned" % ip_address)
 
-    # TODO: fail if no IP assigned
     if not ip_address or not subnet_id:
         ip_address = None
         subnet_id = choice(config.get('subnet_ids'))
@@ -207,6 +303,7 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
                 client_token=token,
                 disable_api_termination=bool(config.get('disable_api_termination')),
                 network_interfaces=interfaces,
+                instance_profile_name=config.get("instance_profile_name"),
             )
             break
         except boto.exception.BotoServerError:
@@ -222,7 +319,7 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
             if instance.state == 'running':
                 break
         except Exception:
-            log.exception("hit error waiting for instance to come up")
+            log.warn("waiting for instance to come up, retrying in 10 sec...")
         time.sleep(10)
 
     instance.add_tag('Name', name)
@@ -230,15 +327,21 @@ def create_instance(name, config, region, secrets, key_name, instance_data,
     instance.add_tag('created', time.strftime("%Y-%m-%d %H:%M:%S %Z",
                                               time.gmtime()))
     instance.add_tag('moz-type', config['type'])
+    if loaned_to:
+        instance.add_tag("moz-loaned-to", loaned_to)
+    if loan_bug:
+        instance.add_tag("moz-bug", loan_bug)
 
     log.info("assimilating %s", instance)
     instance.add_tag('moz-state', 'pending')
     while True:
         try:
-            assimilate(instance.private_ip_address, config, instance_data, deploypass)
+            assimilate(instance.private_ip_address, config, instance_data,
+                       deploypass)
             break
         except:
-            log.exception("problem assimilating %s", instance)
+            log.warn("problem assimilating %s (%s), retrying in 10 sec ...",
+                     instance_data['hostname'], instance.id)
             time.sleep(10)
     instance.add_tag('moz-state', 'ready')
 
@@ -313,14 +416,14 @@ class LoggingProcess(multiprocessing.Process):
 
 
 def make_instances(names, config, region, secrets, key_name, instance_data,
-                   deploypass):
+                   deploypass, loaned_to, loan_bug):
     """Create instances for each name of names for the given configuration"""
     procs = []
     for name in names:
         p = LoggingProcess(log="{name}.log".format(name=name),
                            target=create_instance,
                            args=(name, config, region, secrets, key_name,
-                                 instance_data, deploypass),
+                                 instance_data, deploypass, loaned_to, loan_bug),
                            )
         p.start()
         procs.append(p)
@@ -344,12 +447,22 @@ if __name__ == '__main__':
     parser.add_argument("-i", "--instance-data", help="instance specific data",
                         type=argparse.FileType('r'), required=True)
     parser.add_argument("--instance_id", help="assimilate existing instance")
+    parser.add_argument("--no-verify", action="store_true",
+                        help="Skip DNS related checks")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Increase logging verbosity")
+    parser.add_argument("-l", "--loaned-to", help="Loaner contact e-mail")
+    parser.add_argument("-b", "--bug", help="Loaner bug number")
     parser.add_argument("hosts", metavar="host", nargs="+",
                         help="hosts to be processed")
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
+    else:
+        log.setLevel(logging.INFO)
 
     try:
         config = json.load(args.config)[args.region]
@@ -360,5 +473,8 @@ if __name__ == '__main__':
     deploypass = getpass.getpass("Enter puppetagain deploy password:").strip()
 
     instance_data = json.load(args.instance_data)
+    if not args.no_verify:
+        log.info("Sanity checking DNS entries...")
+        verify(args.hosts, config, args.region, secrets)
     make_instances(args.hosts, config, args.region, secrets, args.key_name,
-                   instance_data, deploypass)
+                   instance_data, deploypass, args.loaned_to, args.bug)
