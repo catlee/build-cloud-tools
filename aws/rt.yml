@@ -26,9 +26,22 @@ us-west-2:
             10.132.0.0/16: local
             0.0.0.0/0: VGW
 
+    masters:
+        routes:
+            10.132.0.0/16: local
+            0.0.0.0/0: VGW
+
     testers:
         routes:
             ftp-ssl.mozilla.org: IGW
+            hg.mozilla.org: IGW
+            10.132.0.0/16: local
+            0.0.0.0/0: VGW
+
+    builders:
+        routes:
+            ftp-ssl.mozilla.org: IGW
+            hg.mozilla.org: IGW
             10.132.0.0/16: local
             0.0.0.0/0: VGW
 
@@ -53,6 +66,25 @@ us-east-1:
             10.134.0.0/16: local
             0.0.0.0/0: VGW
 
+    masters:
+        routes:
+            10.134.0.0/16: local
+            0.0.0.0/0: VGW
+
+    testers:
+        routes:
+            hg.mozilla.org: IGW
+            ftp-ssl.mozilla.org: IGW
+            10.134.0.0/16: local
+            0.0.0.0/0: VGW
+
+    builders:
+        routes:
+            hg.mozilla.org: IGW
+            ftp-ssl.mozilla.org: IGW
+            10.134.0.0/16: local
+            0.0.0.0/0: VGW
+
     try:
         routes:
             # Amazon routes
@@ -68,11 +100,6 @@ us-east-1:
             10.134.0.0/16: local
             0.0.0.0/0: VGW
 
-    testers:
-        routes:
-            ftp-ssl.mozilla.org: IGW
-            10.134.0.0/16: local
-            0.0.0.0/0: VGW
 
     "EB: NAT1":
         routes:

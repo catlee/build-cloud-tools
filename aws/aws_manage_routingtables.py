@@ -44,7 +44,14 @@ def sync_tables(conn, my_tables, remote_tables):
             remote_tables.remove(t)
         seen_names.add(name)
 
-    # TODO: Create tables that exist in my_tables but not in remote_tables
+    for name in my_tables:
+        if name not in seen_names:
+            # TODO: Allow multiple VPCs to exist per region
+            vpc_id = conn.get_all_vpcs()[0].id
+            log.info("remote table %s doesn't exist; creating in vpc %s", name, vpc_id)
+            t = conn.create_route_table(vpc_id)
+            t.add_tag('Name', name)
+            remote_tables.append(t)
 
     # Sync remote tables
     for t in remote_tables:
@@ -105,7 +112,7 @@ def sync_tables(conn, my_tables, remote_tables):
 
 def main():
     log.debug("Parsing file")
-    rt_defs = load_config('rt.txt')
+    rt_defs = load_config('rt.yml')
 
     regions = set(rt_defs.keys())
 
