@@ -10,6 +10,7 @@
         "instance_type": "m1.medium",
         "distro": "win2012",
         "user_data_file": "ami_configs/tst-win64.user_data",
+        "use_public_ip": true,
         "device_map": {
             "/dev/sda1": {
                 "size": 30,
@@ -29,6 +30,7 @@
         "instance_type": "m1.medium",
         "distro": "win2012",
         "user_data_file": "ami_configs/tst-win64.user_data",
+        "use_public_ip": true,
         "device_map": {
             "/dev/sda1": {
                 "size": 30,
