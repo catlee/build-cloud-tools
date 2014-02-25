@@ -264,19 +264,6 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets,
         allocated_slaves = get_allocated_slaves(None)
         stopped_instances = filter(lambda i: i.tags.get('Name') not in allocated_slaves, stopped_instances)
 
-    # If we have specific slaves required, add those first
-    if slaveset:
-        for i in stopped_instances[:]:
-            if i.tags.get('Name') not in slaveset:
-                continue
-            k = (i.placement, i.instance_type)
-            to_start.append((i, k in reservations))
-            stopped_instances.remove(i)
-            if k in reservations:
-                reservations[k] -= 1
-                if reservations[k] <= 0:
-                    del reservations[k]
-
     # While we still have reservations, start instances that can use those
     # reservations first
     for i in stopped_instances[:]:
@@ -641,9 +628,9 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
             running = aws_get_running_instances(all_instances, instance_type, slaveset)
             log.debug("%i running for %s %s", len(running), instance_type, slaveset)
             # TODO: This logic is probably too simple
-            # Assume one slave finishes every 30s, so for each 30 running
-            # slaves, reduce our required count by 1
-            delta = len(running) / 30
+            # Reduce the number of required slaves by 10% of those that are
+            # running
+            delta = len(running) / 10
             log.debug("reducing required count by %i (%i running; need %i)", delta, len(running), count)
             d[instance_type, slaveset] = max(0, count - delta)
             if d[instance_type, slaveset] == 0:
