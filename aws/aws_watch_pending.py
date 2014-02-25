@@ -91,25 +91,28 @@ def aws_get_spot_requests(region, secrets, moz_instance_type):
     return [r for r in req if r.state in ("open", "active")]
 
 
-_aws_instances_cache = None
+_aws_instances_cache = {}
 
 
 def aws_get_all_instances(regions, secrets):
     """
     Returns a list of all instances in the given regions
     """
-    global _aws_instances_cache
     log.debug("fetching all instances for %s", regions)
-    if _aws_instances_cache is not None:
-        log.debug("aws_get_all_instances - cache hit")
-        return _aws_instances_cache
     retval = []
     for region in regions:
-        conn = aws_connect_to_region(region, secrets)
-        reservations = conn.get_all_instances()
-        for r in reservations:
-            retval.extend(r.instances)
-    _aws_instances_cache = retval
+        if region in _aws_instances_cache:
+            log.debug("aws_get_all_instances - cache hit for %s", region)
+            retval.extend(_aws_instances_cache[region])
+        else:
+            conn = aws_connect_to_region(region, secrets)
+            reservations = conn.get_all_instances()
+            region_instances = []
+            for r in reservations:
+                region_instances.extend(r.instances)
+            log.debug("aws_get_running_instances - caching %s", region)
+            _aws_instances_cache[region] = region_instances
+            retval.extend(region_instances)
     return retval
 
 
