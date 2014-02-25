@@ -98,8 +98,8 @@ def aws_get_all_instances(regions, secrets):
     """
     Returns a list of all instances in the given regions
     """
-    log.debug("fetching all instances for %s", regions)
     global _aws_instances_cache
+    log.debug("fetching all instances for %s", regions)
     if _aws_instances_cache is not None:
         log.debug("aws_get_all_instances - cache hit")
         return _aws_instances_cache
