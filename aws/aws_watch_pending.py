@@ -257,7 +257,7 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets,
     log.debug("filtering by slaveset %s", slaveset)
     # Filter the list of stopped instances by slaveset
     if slaveset:
-        stopped_instances = filter(i.tags.get('Name') in slaveset, stopped_instances)
+        stopped_instances = filter(lambda i: i.tags.get('Name') in slaveset, stopped_instances)
     else:
         # Get list of all allocated slaves if we have no specific slaves
         # required
@@ -636,7 +636,7 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
             # slaves, reduce our required count by 1
             delta = len(running) / 30
             log.debug("reducing required count by %i (%i running; need %i)", delta, len(running), count)
-            d[instance_type, slaveset] = max(0, count-delta)
+            d[instance_type, slaveset] = max(0, count - delta)
             if d[instance_type, slaveset] == 0:
                 log.debug("removing requirement for %s %s", instance_type, slaveset)
                 to_delete.add((instance_type, slaveset))
@@ -649,7 +649,6 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
 
         for instance_type, slaveset in to_delete:
             del d[instance_type, slaveset]
-
 
     for (instance_type, slaveset), count in to_create_spot.iteritems():
         log.debug("need %i spot %s for slaveset %s", count, instance_type, slaveset)
