@@ -604,6 +604,10 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
     db = sa.create_engine(dburl)
     pending = find_pending(db)
 
+    if not pending:
+        log.info("no pending jobs! all done!")
+        return
+
     # Mapping of (instance types, slaveset) to # of instances we want to
     # creates
     to_create_ondemand = defaultdict(int)
