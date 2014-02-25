@@ -628,6 +628,10 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
             log.debug("%s has pending jobs, but no instance types defined",
                       pending_buildername)
 
+    if not to_create_spot and not to_create_ondemand:
+        log.info("no pending jobs we can do anything about! all done!")
+        return
+
     # For each instance_type, slaveset, find how many are currently running,
     # and scale our count accordingly
     all_instances = aws_get_all_instances(regions, secrets)
