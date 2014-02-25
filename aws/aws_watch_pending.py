@@ -607,6 +607,7 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
     if not pending:
         log.info("no pending jobs! all done!")
         return
+    log.info("processing %i pending jobs", len(pending))
 
     # Mapping of (instance types, slaveset) to # of instances we want to
     # creates
