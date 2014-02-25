@@ -621,9 +621,10 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
     # For each instance_type, slaveset, find how many are currently running,
     # and scale our count accordingly
     all_instances = aws_get_all_instances(regions, secrets)
-    for (instance_type, slaveset), count in to_create_spot.iteritems():
-        running = aws_get_running_instances(all_instances, instance_type, slaveset)
-        log.debug("%i running for %s %s", len(running), instance_type, slaveset)
+    for d in to_create_spot, to_create_ondemand:
+        for (instance_type, slaveset), count in d.iteritems():
+            running = aws_get_running_instances(all_instances, instance_type, slaveset)
+            log.debug("%i running for %s %s", len(running), instance_type, slaveset)
 
         # TODO: If slaveset is None, and all our slaves are running, we should
         # remove it from the set of things to try and start instances for
