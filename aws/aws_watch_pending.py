@@ -422,7 +422,7 @@ def do_request_spot_instances(amount, region, secrets, moz_instance_type, ami,
     started = 0
     for _ in range(amount):
         try:
-            do_request_spot_instance(
+            r = do_request_spot_instance(
                 region=region, secrets=secrets,
                 moz_instance_type=moz_instance_type,
                 price=spot_choice.bid_price,
@@ -431,7 +431,8 @@ def do_request_spot_instances(amount, region, secrets, moz_instance_type, ami,
                 cached_cert_dir=cached_cert_dir,
                 instance_type=spot_choice.instance_type, slaveset=slaveset,
                 dryrun=dryrun)
-            started += 1
+            if r:
+                started += 1
         except (RuntimeError):
             log.warn("Cannot start", exc_info=True)
     return started
@@ -446,8 +447,8 @@ def do_request_spot_instance(region, secrets, moz_instance_type, price, ami,
         availability_zone=availability_zone,
         slaveset=slaveset)
     if not interface:
-        # TODO: Don't raise here...?
-        raise RuntimeError("No free network interfaces left in %s" % region)
+        log.warn("No free network interfaces left in %s" % region)
+        return False
 
     # TODO: check DNS
     fqdn = interface.tags.get("FQDN")
