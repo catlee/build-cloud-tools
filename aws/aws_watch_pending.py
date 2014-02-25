@@ -91,17 +91,24 @@ def aws_get_spot_requests(region, secrets, moz_instance_type):
     return [r for r in req if r.state in ("open", "active")]
 
 
+_aws_instances_cache = None
+
+
 def aws_get_all_instances(regions, secrets):
     """
     Returns a list of all instances in the given regions
     """
     log.debug("fetching all instances for %s", regions)
+    global _aws_instances_cache
+    if _aws_instances_cache:
+        return _aws_instances_cache
     retval = []
     for region in regions:
         conn = aws_connect_to_region(region, secrets)
         reservations = conn.get_all_instances()
         for r in reservations:
             retval.extend(r.instances)
+    _aws_instances_cache = retval
     return retval
 
 
@@ -123,6 +130,25 @@ def aws_filter_instances(all_instances, state=None, tags=None):
             continue
         if matched:
             retval.append(i)
+    return retval
+
+
+def aws_get_running_instances(all_instances, instance_type, slaveset):
+    retval = []
+    if not slaveset:
+        allocated_slaves = get_allocated_slaves(None)
+
+    for i in all_instances:
+        if i.tags.get('moz-type') != instance_type:
+            continue
+        if i.tags.get('moz-state') != 'ready':
+            continue
+        if slaveset:
+            if i.tags.get('Name') in slaveset:
+                retval.append(i)
+        elif i.tags.get('Name') not in allocated_slaves:
+            retval.append(i)
+
     return retval
 
 
@@ -591,6 +617,16 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
         else:
             log.debug("%s has pending jobs, but no instance types defined",
                       pending_buildername)
+
+    # For each instance_type, slaveset, find how many are currently running,
+    # and scale our count accordingly
+    all_instances = aws_get_all_instances(regions, secrets)
+    for (instance_type, slaveset), count in to_create_spot.iteritems():
+        running = aws_get_running_instances(all_instances, instance_type, slaveset)
+        log.debug("%i running for %s %s", len(running), instance_type, slaveset)
+
+        # TODO: If slaveset is None, and all our slaves are running, we should
+        # remove it from the set of things to try and start instances for
 
     for (instance_type, slaveset), count in to_create_spot.iteritems():
         log.debug("need %i spot %s for slaves %s", count, instance_type, slaveset)
