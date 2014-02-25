@@ -168,11 +168,13 @@ def aws_filter_reservations(reservations, running_instances):
 
 
 def aws_resume_instances(moz_instance_type, start_count, regions, secrets,
-                         region_priorities, instance_type_changes, dryrun, slaveset):
+                         region_priorities, instance_type_changes, dryrun,
+                         slaveset):
     """Resume up to `start_count` stopped instances of the given type in the
     given regions"""
     # Fetch all our instance information
     all_instances = aws_get_all_instances(regions, secrets)
+
     # We'll filter by these tags in general
     tags = {'moz-state': 'ready', 'moz-type': moz_instance_type}
 
@@ -221,6 +223,29 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets,
 
     # List of (instance, is_reserved) tuples
     to_start = []
+
+    log.debug("filtering by slaveset %s", slaveset)
+    # Filter the list of stopped instances by slaveset
+    if slaveset:
+        stopped_instances = filter(i.tags.get('Name') in slaveset, stopped_instances)
+    else:
+        # Get list of all allocated slaves if we have no specific slaves
+        # required
+        allocated_slaves = get_allocated_slaves(None)
+        stopped_instances = filter(i.tags.get('Name') not in allocated_slaves, stopped_instances)
+
+    # If we have specific slaves required, add those first
+    if slaveset:
+        for i in stopped_instances[:]:
+            if i.tags.get('Name') not in slaveset:
+                continue
+            k = (i.placement, i.instance_type)
+            to_start.append((i, k in reservations))
+            stopped_instances.remove(i)
+            if k in reservations:
+                reservations[k] -= 1
+                if reservations[k] <= 0:
+                    del reservations[k]
 
     # While we still have reservations, start instances that can use those
     # reservations first
@@ -395,6 +420,7 @@ def do_request_spot_instance(region, secrets, moz_instance_type, price, ami,
         availability_zone=availability_zone,
         slaveset=slaveset)
     if not interface:
+        # TODO: Don't raise here...?
         raise RuntimeError("No free network interfaces left in %s" % region)
 
     # TODO: check DNS
@@ -525,10 +551,12 @@ def get_allocated_slaves(buildername):
         return _jacuzzi_allocated_cache[buildername]
 
     if buildername is None:
+        log.debug("getting set of all allocated slaves")
         r = requests.get("{0}/allocated/all".format(JACUZZI_BASE_URL))
         _jacuzzi_allocated_cache[buildername] = frozenset(r.json()['machines'])
         return _jacuzzi_allocated_cache[buildername]
 
+    log.debug("getting slaves allocated to %s", buildername)
     r = requests.get("{0}/builders/{1}".format(JACUZZI_BASE_URL, buildername))
     # Handle 404 specially
     if r.status_code == 404:
