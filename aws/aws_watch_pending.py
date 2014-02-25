@@ -628,8 +628,9 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
             # Assume each running slave will become available in 30 minutes. So
             # for each 30 slaves, reduce our required count by 1
             delta = len(running) / 30
-            log.debug("reducing required count by %i", delta)
-            d[instance_type, slaveset] -= delta
+            log.debug("reducing required count by %i (%i running; need %i)", delta, len(running), count)
+            d[instance_type, slaveset] = max(0, count-delta)
+            # TODO: Delete if 0?
 
         # TODO: If slaveset is None, and all our slaves are running, we should
         # remove it from the set of things to try and start instances for
