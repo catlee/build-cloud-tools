@@ -450,7 +450,7 @@ def do_request_spot_instance(region, secrets, moz_instance_type, price, ami,
 
     if dryrun:
         log.info("Dry run. skipping")
-        return
+        return True
 
     spec = NetworkInterfaceSpecification(
         network_interface_id=interface.id)
@@ -507,6 +507,7 @@ EOF
         instance_profile_name=instance_config[region].get("instance_profile_name"),
     )
     sir[0].add_tag("moz-type", moz_instance_type)
+    return True
 
 
 _cached_interfaces = {}
