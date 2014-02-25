@@ -490,14 +490,14 @@ def get_available_interface(conn, moz_instance_type, availability_zone, slaveset
         # Find one in our slaveset
         if slaveset:
             for i in _cached_interfaces[availability_zone][moz_instance_type]:
-                if i.tags.get("FQDN").split(".") in slaveset:
+                if i.tags.get("FQDN").split(".")[0] in slaveset:
                     _cached_interfaces[availability_zone][moz_instance_type].remove(i)
                     log.debug("using %s", i.tags.get("FQDN"))
                     return i
         else:
             allocated_slaves = get_allocated_slaves(None)
             for i in _cached_interfaces[availability_zone][moz_instance_type]:
-                if i.tags.get("FQDN").split(".") not in allocated_slaves:
+                if i.tags.get("FQDN").split(".")[0] not in allocated_slaves:
                     _cached_interfaces[availability_zone][moz_instance_type].remove(i)
                     log.debug("using %s", i.tags.get("FQDN"))
                     return i
