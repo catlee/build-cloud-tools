@@ -100,7 +100,7 @@ def aws_get_all_instances(regions, secrets):
     """
     log.debug("fetching all instances for %s", regions)
     global _aws_instances_cache
-    if _aws_instances_cache:
+    if _aws_instances_cache is not None:
         log.debug("aws_get_all_instances - cache hit")
         return _aws_instances_cache
     retval = []
