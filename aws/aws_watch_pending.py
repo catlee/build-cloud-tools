@@ -623,21 +623,32 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
     # and scale our count accordingly
     all_instances = aws_get_all_instances(regions, secrets)
     for d in to_create_spot, to_create_ondemand:
+        to_delete = set()
         for (instance_type, slaveset), count in d.iteritems():
             running = aws_get_running_instances(all_instances, instance_type, slaveset)
             log.debug("%i running for %s %s", len(running), instance_type, slaveset)
-            # Assume each running slave will become available in 30 minutes. So
-            # for each 30 slaves, reduce our required count by 1
+            # TODO: This logic is probably too simple
+            # Assume one slave finishes every 30s, so for each 30 running
+            # slaves, reduce our required count by 1
             delta = len(running) / 30
             log.debug("reducing required count by %i (%i running; need %i)", delta, len(running), count)
             d[instance_type, slaveset] = max(0, count-delta)
-            # TODO: Delete if 0?
+            if d[instance_type, slaveset] == 0:
+                log.debug("removing requirement for %s %s", instance_type, slaveset)
+                to_delete.add((instance_type, slaveset))
 
-        # TODO: If slaveset is None, and all our slaves are running, we should
-        # remove it from the set of things to try and start instances for
+            # If slaveset is not None, and all our slaves are running, we should
+            # remove it from the set of things to try and start instances for
+            if slaveset and set(i.tags.get('Name') for i in running) == slaveset:
+                log.debug("removing %s %s since all the slaves are running", instance_type, slaveset)
+                to_delete.add((instance_type, slaveset))
+
+        for instance_type, slaveset in to_delete:
+            del d[instance_type, slaveset]
+
 
     for (instance_type, slaveset), count in to_create_spot.iteritems():
-        log.debug("need %i spot %s for slaves %s", count, instance_type, slaveset)
+        log.debug("need %i spot %s for slaveset %s", count, instance_type, slaveset)
         started = request_spot_instances(
             moz_instance_type=instance_type, start_count=count,
             regions=regions, secrets=secrets,
@@ -645,14 +656,14 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
             dryrun=dryrun, cached_cert_dir=cached_cert_dir,
             slaveset=slaveset)
         count -= started
-        log.info("%s - started %i spot instances for slaves %s; need %i",
+        log.info("%s - started %i spot instances for slaveset %s; need %i",
                  instance_type, started, slaveset, count)
 
         # Add leftover to ondemand
         to_create_ondemand[instance_type, slaveset] += count
 
     for (instance_type, slaveset), count in to_create_ondemand.iteritems():
-        log.debug("need %i ondemand %s for slaves %s", count, instance_type, slaveset)
+        log.debug("need %i ondemand %s for slaveset %s", count, instance_type, slaveset)
         if count < 1:
             continue
 
@@ -662,7 +673,7 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
                                        region_priorities,
                                        instance_type_changes, dryrun, slaveset)
         count -= started
-        log.info("%s - started %i instances for slaves %s; need %i",
+        log.info("%s - started %i instances for slaveset %s; need %i",
                  instance_type, started, slaveset, count)
 
 if __name__ == '__main__':
