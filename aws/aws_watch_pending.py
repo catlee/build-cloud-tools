@@ -632,7 +632,7 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
             # Reduce the number of required slaves by 10% of those that are
             # running
             delta = len(running) / 10
-            log.debug("reducing required count by %i (%i running; need %i)", delta, len(running), count)
+            log.debug("reducing required count for %s %s by %i (%i running; need %i)", instance_type, slaveset, delta, len(running), count)
             d[instance_type, slaveset] = max(0, count - delta)
             if d[instance_type, slaveset] == 0:
                 log.debug("removing requirement for %s %s", instance_type, slaveset)
