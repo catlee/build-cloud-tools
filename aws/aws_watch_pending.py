@@ -714,3 +714,4 @@ if __name__ == '__main__':
         cached_cert_dir=args.cached_cert_dir,
         instance_type_changes=config.get("instance_type_changes", {})
     )
+    log.info("done")
