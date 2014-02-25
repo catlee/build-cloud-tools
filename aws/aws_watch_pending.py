@@ -258,7 +258,7 @@ def aws_resume_instances(moz_instance_type, start_count, regions, secrets,
         # Get list of all allocated slaves if we have no specific slaves
         # required
         allocated_slaves = get_allocated_slaves(None)
-        stopped_instances = filter(i.tags.get('Name') not in allocated_slaves, stopped_instances)
+        stopped_instances = filter(lambda i: i.tags.get('Name') not in allocated_slaves, stopped_instances)
 
     # If we have specific slaves required, add those first
     if slaveset:
@@ -625,6 +625,11 @@ def aws_watch_pending(dburl, regions, secrets, builder_map, region_priorities,
         for (instance_type, slaveset), count in d.iteritems():
             running = aws_get_running_instances(all_instances, instance_type, slaveset)
             log.debug("%i running for %s %s", len(running), instance_type, slaveset)
+            # Assume each running slave will become available in 30 minutes. So
+            # for each 30 slaves, reduce our required count by 1
+            delta = len(running) / 30
+            log.debug("reducing required count by %i", delta)
+            d[instance_type, slaveset] -= delta
 
         # TODO: If slaveset is None, and all our slaves are running, we should
         # remove it from the set of things to try and start instances for
