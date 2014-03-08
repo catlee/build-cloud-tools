@@ -350,7 +350,6 @@ def main():
     parser.set_defaults(
         config=None,
         region="us-east-1",
-        secrets=None,
         key_name=None,
         action="create",
         keep_volume=False,
