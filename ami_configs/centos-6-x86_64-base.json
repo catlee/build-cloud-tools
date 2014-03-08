@@ -1,50 +1,36 @@
 {
     "us-east-1": {
-        "ami": "ami-7d0c6314",
-        "instance_type": "c1.xlarge",
-        "arch": "x86_64",
+        "host_config": {
+            "ami": "ami-7d0c6314",
+            "instance_type": "m3.large",
+            "arch": "x86_64",
+            "subnet_name": "build",
+            "skip_zones": ["us-east-1b"],
+            "user": "ec2-user",
+            "instance_name": "base-bld-linux64",
+            "ssh_keyname": "aws-releng"
+        },
         "distro": "centos",
-        "target": {
-            "size": 4,
-            "fs_type": "ext4",
-            "e2_label": "root_dev",
-            "aws_dev_name": "/dev/sdh",
-            "int_dev_name": "/dev/xvdl",
-            "mount_point": "/mnt",
-            "tags": {
-                "moz-type": "bld-linux64"
+        "target_virtualization_types": {
+            "pv": {
+                "aws_dev_name": "/dev/sdc",
+                "int_dev_name": "/dev/xvdg",
+                "fs_label": "boot_dev"
+            },
+            "hvm": {
+                "aws_dev_name": "/dev/sdd",
+                "int_dev_name": "/dev/xvdh",
+                "fs_label": "boot_dev"
             }
-        }
-    },
-    "us-west-1": {
-        "ami": "ami-c7fad582",
-        "instance_type": "c1.xlarge",
-        "arch": "x86_64",
-        "distro": "centos",
+        },
+        "user": "ec2-user",
         "target": {
-            "size": 4,
+            "size": 2,
             "fs_type": "ext4",
-            "e2_label": "root_dev",
-            "aws_dev_name": "/dev/sdh",
-            "int_dev_name": "/dev/xvdl",
-            "mount_point": "/mnt",
-            "tags": {
-                "moz-type": "bld-linux64"
-            }
-        }
-    },
-    "us-west-2": {
-        "ami": "ami-5344d263",
-        "instance_type": "c1.xlarge",
-        "arch": "x86_64",
-        "distro": "centos",
-        "target": {
-            "size": 4,
-            "fs_type": "ext4",
-            "e2_label": "root_dev",
-            "aws_dev_name": "/dev/sdh",
-            "int_dev_name": "/dev/xvdl",
-            "mount_point": "/mnt",
+            "fs_label": "root_dev",
+            "aws_dev_name": "/dev/sdb",
+            "int_dev_name": "/dev/xvdf",
+            "mount_point": "/mnt/root",
             "tags": {
                 "moz-type": "bld-linux64"
             }

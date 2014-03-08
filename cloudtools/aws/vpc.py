@@ -1,5 +1,7 @@
 from IPy import IP
 
+from cloudtools.aws import get_vpc
+
 
 def get_subnet_id(vpc, ip):
     subnets = vpc.get_all_subnets()
@@ -19,3 +21,9 @@ def ip_available(conn, ip):
         return False
     else:
         return True
+
+
+def get_subnets_by_name(region, name):
+    conn = get_vpc(region)
+    all_subnets = conn.get_all_subnets()
+    return [s for s in all_subnets if s.tags.get('Name') == name]
