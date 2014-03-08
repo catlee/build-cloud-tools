@@ -273,6 +273,8 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
     if not v.tags.get('formatted'):
         format_device(mount_dev, config['target']['fs_type'], config['target']['fs_label'])
         v.add_tag('formatted', time.time())
+    else:
+        log.info("not formatting since it was formatted at %s", v.tags['formatted'])
 
     if not is_mounted(mount_point):
         mount_device(mount_dev, mount_point)
@@ -290,11 +292,16 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
             install_centos(config_dir, config)
 
         v.add_tag('installed_os', time.time())
+    else:
+        log.info("not installing os since it was installed at %s", v.tags['installed_os'])
 
     # Step 3: upload custom configuration files
     if not v.tags.get('added_configs'):
         configify(config_dir, config)
         v.add_tag('added_configs', time.time())
+    else:
+        log.info("not adding configs os since they were added at %s", v.tags['added_configs'])
+
 
     # Step 4: Create /boot volumes
     boot_volumes = {}
