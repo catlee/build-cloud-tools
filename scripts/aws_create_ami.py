@@ -216,6 +216,7 @@ def register_ami(conn, name, config, virtualization_type, boot_snapshot, root_sn
         kernel_id = None
         ramdisk_id = None
     else:
+        # TODO: Are these needed
         kernel_id = host_img.kernel_id
         ramdisk_id = host_img.ramdisk_id
 
