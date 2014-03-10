@@ -12,12 +12,16 @@
         },
         "distro": "centos",
         "target_virtualization_types": {
-            "pv": {
+            "paravirtual": {
+                "root_dev_name": "/dev/sda1",
+                "boot_dev_name": "/dev/sdb",
                 "aws_dev_name": "/dev/sdc",
                 "int_dev_name": "/dev/xvdg",
                 "fs_label": "boot_dev"
             },
             "hvm": {
+                "root_dev_name": "/dev/sda1",
+                "boot_dev_name": "/dev/sdb",
                 "aws_dev_name": "/dev/sdd",
                 "int_dev_name": "/dev/xvdh",
                 "fs_label": "boot_dev"
