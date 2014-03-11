@@ -24,6 +24,26 @@ def manage_service(service, target, state, distro="centos"):
                                                         state))
 
 
+def attach_volume(volume, instance, aws_dev_name, int_dev_name):
+    while True:
+        try:
+            log.debug("trying to attach at %s", aws_dev_name)
+            volume.attach(instance.id, aws_dev_name)
+            break
+        except:
+            log.debug('hit error waiting for volume to be attached')
+            time.sleep(10)
+    wait_for_status(volume, "status", "in-use", "update")
+    while True:
+        try:
+            if run('ls %s' % int_dev_name, quiet=True).succeeded:
+                break
+        except:
+            log.debug('hit error waiting for volume to be attached')
+            time.sleep(10)
+    return
+
+
 def get_volume(instance, size, mount_point, dev_name, tag_name):
     """Creates a volume `size` GB large, and attaches it to instance"""
     bdm = instance.block_device_mapping
@@ -38,24 +58,7 @@ def get_volume(instance, size, mount_point, dev_name, tag_name):
         v = instance.connection.create_volume(size=size, zone=instance.placement)
         log.info("created %s", v)
         v.add_tag('Name', tag_name)
-        while True:
-            try:
-                log.debug("trying to attach at %s", mount_point)
-                v.attach(instance.id, mount_point)
-                break
-            except:
-                log.debug('hit error waiting for volume to be attached')
-                time.sleep(10)
-
-        wait_for_status(v, "status", "in-use", "update")
-
-    while True:
-        try:
-            if run('ls %s' % dev_name, quiet=True).succeeded:
-                break
-        except:
-            log.debug('hit error waiting for volume to be attached')
-            time.sleep(10)
+        attach_volume(v, instance, mount_point, dev_name)
     return v
 
 
@@ -68,8 +71,11 @@ def is_mounted(mount_point):
         return True
 
 
-def format_device(mount_dev, fs, label):
-    run('/sbin/mkfs.{fs_type} {dev}'.format(fs_type=fs, dev=mount_dev))
+def format_device(mount_dev, fs, label, inode_size=None):
+    if not inode_size:
+        run('/sbin/mkfs.{fs_type} {dev}'.format(fs_type=fs, dev=mount_dev))
+    else:
+        run('/sbin/mkfs.{fs_type} -I {inode_size} {dev}'.format(fs_type=fs, dev=mount_dev, inode_size=inode_size))
     run('/sbin/e2label {dev} {label}'.format(dev=mount_dev, label=label))
 
 
@@ -124,18 +130,12 @@ def install_centos(config_dir, config):
     run('chroot %s rpmdb --rebuilddb || :' % mount_point)
 
 
-def grubstuff(config_dir, config):
-    mount_point = config['target']['mount_point']
-    int_dev_name = config['target']['int_dev_name']
-    # See https://bugs.archlinux.org/task/30241 for the details,
-    # grub-nstall doesn't handle /dev/xvd* devices properly
-    grub_install_patch = os.path.join(config_dir, "grub-install.diff")
-    if os.path.exists(grub_install_patch):
-        put(grub_install_patch, "/tmp/grub-install.diff")
-        run('which patch >/dev/null || yum install -y patch')
-        run('patch -p0 -i /tmp/grub-install.diff /sbin/grub-install')
+def setup_grub(root_mount_point, boot_mount_point, int_dev_name):
+    run("mkdir -p %s/boot/grub" % boot_mount_point)
+    run("rsync -a --delete {root_mount_point}/boot/ {boot_mount_point}/boot/".format(boot_mount_point=boot_mount_point, root_mount_point=root_mount_point))
+    run("echo '(hd0) {int_dev_name}' > {boot_mount_point}/boot/grub/device.map".format(int_dev_name=int_dev_name, boot_mount_point=boot_mount_point))
     run("grub-install --root-directory=%s --no-floppy %s" %
-        (mount_point, int_dev_name))
+        (boot_mount_point, int_dev_name))
 
 
 def configify(config_dir, config):
@@ -153,7 +153,7 @@ def configify(config_dir, config):
             else:
                 log.warn("Skipping %s", f)
 
-    run('sed -i -e s/@ROOT_DEV_LABEL@/{label}/g -e s/@FS_TYPE@/{fs}/g '
+    run('sed -i -e s,@ROOT_DEV_LABEL@,{label},g -e s,@FS_TYPE@,{fs},g '
         '{mnt}/etc/fstab'.format(label=config['target']['fs_label'],
                                  fs=config['target']['fs_type'],
                                  mnt=mount_point))
@@ -246,6 +246,15 @@ def register_ami(conn, name, config, virtualization_type, boot_snapshot, root_sn
             time.sleep(10)
 
 
+def patch_grub(config_dir):
+    # See https://bugs.archlinux.org/task/30241 for the details,
+    # grub-nstall doesn't handle /dev/xvd* devices properly
+    log.info("patching grub-install")
+    grub_install_patch = os.path.join(config_dir, "grub-install.diff")
+    put(grub_install_patch, "/tmp/grub-install.diff")
+    run('patch -p0 -i /tmp/grub-install.diff /sbin/grub-install')
+
+
 def create_amis(target_name, host_instance, config, keep_host_instance=False, keep_volume=False):
     connection = host_instance.connection
     env.host_string = host_instance.private_ip_address
@@ -315,6 +324,10 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
         else:
             log.info("not adding configs os since they were added at %s", v.tags['added_configs'])
 
+        if not v.tags.get('patched_grub'):
+            patch_grub(config_dir)
+            v.add_tag('patched_grub', time.time())
+
     # Step 4: Create /boot volumes and snapshots
     boot_snapshots = {}
     log.info('Creating /boot volumes and snapshots')
@@ -329,6 +342,9 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
 
         bv_name = "boot-%s" % vt
         bv_mount = "/mnt/%s" % bv_name
+        int_dev_name = vt_config['int_dev_name']
+        int_part_name = int_dev_name + "1"
+
         # Check if the volumes exist already
         if not host_instance.tags.get('boot-%s_volume_id' % vt):
             bv = get_volume(host_instance, 1, vt_config['aws_dev_name'], vt_config['int_dev_name'], bv_name)
@@ -342,20 +358,24 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
                 wait_for_status(bv, 'status', 'in-use', 'update')
 
         if not is_mounted(bv_mount):
-            format_device(vt_config['int_dev_name'], 'ext2', 'boot')
-            mount_device(vt_config['int_dev_name'], bv_mount)
+            log.info("Creating partition")
+            run("parted -s {int_dev_name} mklabel msdos".format(int_dev_name=int_dev_name))
+            run("parted -s {int_dev_name} mkpart primary ext2 1 '100%'".format(int_dev_name=int_dev_name))
+            run("parted -s {int_dev_name} set 1 boot on".format(int_dev_name=int_dev_name))
+            format_device(int_part_name, 'ext2', 'boot', inode_size=128)
+            mount_device(int_part_name, bv_mount)
 
-        run("rsync -a --delete %s/boot/ %s/boot/" % (mount_point, bv_mount))
+        setup_grub(mount_point, bv_mount, vt_config['int_dev_name'])
+        exit()
         unmount(bv_mount)
 
         boot_snapshots[vt] = create_snapshot(bv, dated_target_name + "-" + vt)
         host_instance.add_tag('boot-%s_snapshot_id' % vt, boot_snapshots[vt].id)
 
-        unmount(mount_point)
-
     # Step 5: Create a snapshot of /, and boot volumes
     if not host_instance.tags.get('root_snapshot_id'):
         log.info("Creating snapshot of root volume %s", v)
+        unmount(mount_point)
         root_snapshot = create_snapshot(v, dated_target_name)
         log.info("snapshot: %s", root_snapshot)
         host_instance.add_tag('root_snapshot_id', root_snapshot.id)
