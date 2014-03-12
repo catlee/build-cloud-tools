@@ -26,6 +26,9 @@ def manage_service(service, target, state, distro="centos"):
 
 def attach_volume(volume, instance, aws_dev_name, int_dev_name):
     while True:
+        if volume.attach_data and volume.attach_data.instance_id == instance.id:
+            log.debug("attached at %s", volume.attach_data.device)
+            break
         try:
             log.debug("trying to attach at %s", aws_dev_name)
             volume.attach(instance.id, aws_dev_name)
@@ -36,6 +39,7 @@ def attach_volume(volume, instance, aws_dev_name, int_dev_name):
     wait_for_status(volume, "status", "in-use", "update")
     while True:
         try:
+            log.debug("waiting for %s", int_dev_name)
             if run('ls %s' % int_dev_name, quiet=True).succeeded:
                 break
         except:
@@ -44,21 +48,18 @@ def attach_volume(volume, instance, aws_dev_name, int_dev_name):
     return
 
 
-def get_volume(instance, size, mount_point, dev_name, tag_name):
+def get_volume(instance, size, aws_dev_name, int_dev_name, volume_name, instance_tag_name):
     """Creates a volume `size` GB large, and attaches it to instance"""
-    bdm = instance.block_device_mapping
-    # Check BDM to see if it's mounted already
-    for name, device in bdm.items():
-        v = instance.connection.get_all_volumes(volume_ids=[device.volume_id])[0]
-        if v.tags.get('Name') == tag_name:
-            log.info("found existing volume %s", v)
-            break
+    volume_id = instance.tags.get(instance_tag_name)
+    if volume_id:
+        v = instance.connection.get_all_volumes(volume_ids=[volume_id])[0]
     else:
         log.info("creating volume %s GB in %s", size, instance.placement)
         v = instance.connection.create_volume(size=size, zone=instance.placement)
         log.info("created %s", v)
-        v.add_tag('Name', tag_name)
-        attach_volume(v, instance, mount_point, dev_name)
+        v.add_tag('Name', volume_name)
+        instance.add_tag(instance_tag_name, v.id)
+    attach_volume(v, instance, aws_dev_name, int_dev_name)
     return v
 
 
@@ -85,10 +86,13 @@ def mount_device(mount_dev, mount_point):
                                            mount_point=mount_point))
 
 
-def setup_chroot(mount_point):
+def setup_chroot(config):
+    mount_point = config['target']['mount_point']
     run('mkdir -p {0}/dev {0}/proc {0}/etc'.format(mount_point))
     if not is_mounted("%s/proc" % mount_point):
         run('mount -t proc proc %s/proc' % mount_point)
+    if config.get('distro') in ('centos',):
+        run('which MAKEDEV >/dev/null || yum install -y MAKEDEV')
     run('for i in console null zero ; '
         'do /sbin/MAKEDEV -d %s/dev -x $i ; done' % mount_point)
 
@@ -130,12 +134,10 @@ def install_centos(config_dir, config):
     run('chroot %s rpmdb --rebuilddb || :' % mount_point)
 
 
-def setup_grub(root_mount_point, boot_mount_point, int_dev_name):
-    run("mkdir -p %s/boot/grub" % boot_mount_point)
-    run("rsync -a --delete {root_mount_point}/boot/ {boot_mount_point}/boot/".format(boot_mount_point=boot_mount_point, root_mount_point=root_mount_point))
-    run("echo '(hd0) {int_dev_name}' > {boot_mount_point}/boot/grub/device.map".format(int_dev_name=int_dev_name, boot_mount_point=boot_mount_point))
+def setup_grub(mount_point, int_dev_name):
+    run("echo '(hd0) {int_dev_name}' > {mount_point}/boot/grub/device.map".format(mount_point=mount_point, int_dev_name=int_dev_name))
     run("grub-install --root-directory=%s --no-floppy %s" %
-        (boot_mount_point, int_dev_name))
+        (mount_point, int_dev_name))
 
 
 def configify(config_dir, config):
@@ -208,24 +210,21 @@ def register_ami(conn, name, config, virtualization_type, boot_snapshot, root_sn
     host_img = conn.get_image(config['host_config']['ami'])
     block_map = BlockDeviceMapping()
     block_map[config['target_virtualization_types'][virtualization_type]['root_dev_name']] = BlockDeviceType(
-        snapshot_id=boot_snapshot.id)
-    block_map[config['target_virtualization_types'][virtualization_type]['boot_dev_name']] = BlockDeviceType(
         snapshot_id=root_snapshot.id)
+    block_map[config['target_virtualization_types'][virtualization_type]['boot_dev_name']] = BlockDeviceType(
+        snapshot_id=boot_snapshot.id)
 
     if virtualization_type == "hvm":
         kernel_id = None
-        ramdisk_id = None
     else:
-        # TODO: Are these needed
-        kernel_id = host_img.kernel_id
-        ramdisk_id = host_img.ramdisk_id
+        # TODO: remove hardcode
+        kernel_id = "aki-499ccb20"  # hd00 kernel. try hd0 kernel?
 
     ami_id = conn.register_image(
         name,
         '%s EBS AMI' % name,
         architecture=config['host_config']['arch'],
-        #kernel_id=kernel_id,
-        #ramdisk_id=ramdisk_id,
+        kernel_id=kernel_id,
         root_device_name=host_img.root_device_name,
         block_device_map=block_map,
         virtualization_type=virtualization_type,
@@ -266,7 +265,7 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
     dated_target_name = "%s-%s" % (
         target_name, time.strftime("%Y-%m-%d-%H-%M", time.gmtime()))
     int_dev_name = config['target']['int_dev_name']
-    mount_dev = int_dev_name
+    #int_part_name = int_dev_name + "1"
     mount_point = config['target']['mount_point']
 
     run("date", quiet=True)
@@ -289,24 +288,23 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
                 v.attach(host_instance.id, config['target']['aws_dev_name'])
                 wait_for_status(v, 'status', 'in-use', 'update')
 
-        # Step 0: install required packages
-        if config.get('distro') in ('centos',):
-            run('which MAKEDEV >/dev/null || yum install -y MAKEDEV')
-
         # Step 1: prepare target FS
         if not v.tags.get('formatted'):
-            format_device(mount_dev, config['target']['fs_type'], config['target']['fs_label'])
+            #run("parted -s {int_dev_name} mklabel msdos".format(int_dev_name=int_dev_name))
+            #run("parted -s {int_dev_name} mkpart primary ext2 1 '100%'".format(int_dev_name=int_dev_name))
+            #run("parted -s {int_dev_name} set 1 boot on".format(int_dev_name=int_dev_name))
+            format_device(int_dev_name, config['target']['fs_type'], config['target']['fs_label'])
             v.add_tag('formatted', time.time())
         else:
             log.info("not formatting since it was formatted at %s", v.tags['formatted'])
 
         if not is_mounted(mount_point):
-            mount_device(mount_dev, mount_point)
+            mount_device(int_dev_name, mount_point)
 
         # Step 2: install base system
         if not v.tags.get('installed_os'):
             if config.get('distro') in ('centos',):
-                setup_chroot(mount_point)
+                setup_chroot(config)
 
             if config.get('distro') in ('debian', 'ubuntu'):
                 install_debian(config_dir, config)
@@ -324,55 +322,41 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
         else:
             log.info("not adding configs os since they were added at %s", v.tags['added_configs'])
 
-        if not v.tags.get('patched_grub'):
+        if not host_instance.tags.get('patched_grub'):
             patch_grub(config_dir)
-            v.add_tag('patched_grub', time.time())
+            host_instance.add_tag('patched_grub', time.time())
 
-    # Step 4: Create /boot volumes and snapshots
+    # Create boot volumes and snapshots
     boot_snapshots = {}
-    log.info('Creating /boot volumes and snapshots')
     for vt, vt_config in config['target_virtualization_types'].items():
-        # Check for a snapshot first
-        snapshot_id = host_instance.tags.get('boot-%s_snapshot_id' % vt)
+        snapshot_id = host_instance.tags.get('%s-snapshot_id' % vt)
         if snapshot_id:
-            # Found one!
-            log.info("Using previous snapshot %s for %s", snapshot_id, vt)
+            log.info("Using snapshot for %s %s", vt, snapshot_id)
             boot_snapshots[vt] = connection.get_all_snapshots(snapshot_ids=[snapshot_id])[0]
             continue
+        bv = get_volume(host_instance, 1, vt_config['aws_dev_name'], vt_config['int_dev_name'], "boot-%s" % vt, "boot-%s_volume_id" % vt)
+        run("mkdir -p /mnt/boot-%s" % vt)
+        if is_mounted("/mnt/boot-%s" % vt):
+            unmount("/mnt/boot-%s" % vt)
 
-        bv_name = "boot-%s" % vt
-        bv_mount = "/mnt/%s" % bv_name
-        int_dev_name = vt_config['int_dev_name']
-        int_part_name = int_dev_name + "1"
-
-        # Check if the volumes exist already
-        if not host_instance.tags.get('boot-%s_volume_id' % vt):
-            bv = get_volume(host_instance, 1, vt_config['aws_dev_name'], vt_config['int_dev_name'], bv_name)
-            host_instance.add_tag('boot-%s_volume_id' % vt, bv.id)
-            # TODO: Delete any snapshot ids if they exist
+        if vt == "hvm":
+            run("parted -s {int_dev_name} mklabel msdos".format(int_dev_name=vt_config['int_dev_name']))
+            run("parted -s {int_dev_name} mkpart primary ext2 1 '100%'".format(int_dev_name=vt_config['int_dev_name']))
+            run("parted -s {int_dev_name} set 1 boot on".format(int_dev_name=vt_config['int_dev_name']))
+            format_device(vt_config['int_dev_name'] + "1", "ext2", "boot", 128)
+            mount_device(vt_config['int_dev_name'] + "1", "/mnt/boot-%s" % vt)
+            run("rsync -a --delete {mount_point}/boot/ /mnt/boot-{vt}/boot/".format(mount_point=mount_point, vt=vt))
+            setup_grub("/mnt/boot-%s" % vt, vt_config['int_dev_name'])
         else:
-            log.info("using existing volume %s", host_instance.tags['boot-%s_volume_id' % vt])
-            bv = connection.get_all_volumes(volume_ids=[host_instance.tags['boot-%s_volume_id' % vt]])[0]
-            if bv.attach_data.instance_id != host_instance.id:
-                bv.attach(host_instance.id, vt_config['aws_dev_name'])
-                wait_for_status(bv, 'status', 'in-use', 'update')
+            format_device(vt_config['int_dev_name'], "ext2", "boot", 128)
+            mount_device(vt_config['int_dev_name'], "/mnt/boot-%s" % vt)
+            run("rsync -a --delete {mount_point}/boot/ /mnt/boot-{vt}/boot/".format(mount_point=mount_point, vt=vt))
 
-        if not is_mounted(bv_mount):
-            log.info("Creating partition")
-            run("parted -s {int_dev_name} mklabel msdos".format(int_dev_name=int_dev_name))
-            run("parted -s {int_dev_name} mkpart primary ext2 1 '100%'".format(int_dev_name=int_dev_name))
-            run("parted -s {int_dev_name} set 1 boot on".format(int_dev_name=int_dev_name))
-            format_device(int_part_name, 'ext2', 'boot', inode_size=128)
-            mount_device(int_part_name, bv_mount)
+        unmount("/mnt/boot-%s" % vt)
+        boot_snapshots[vt] = create_snapshot(bv, vt + "-" + dated_target_name)
+        host_instance.add_tag('%s-snapshot_id' % vt, boot_snapshots[vt].id)
 
-        setup_grub(mount_point, bv_mount, vt_config['int_dev_name'])
-        exit()
-        unmount(bv_mount)
-
-        boot_snapshots[vt] = create_snapshot(bv, dated_target_name + "-" + vt)
-        host_instance.add_tag('boot-%s_snapshot_id' % vt, boot_snapshots[vt].id)
-
-    # Step 5: Create a snapshot of /, and boot volumes
+    # Step 5: Create a snapshot of /
     if not host_instance.tags.get('root_snapshot_id'):
         log.info("Creating snapshot of root volume %s", v)
         unmount(mount_point)
@@ -387,8 +371,9 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
     log.info('Creating AMIs')
     amis = {}
     for vt in config['target_virtualization_types']:
+        boot_snapshot = boot_snapshots[vt]
         ami = register_ami(connection, "%s-%s" % (vt, dated_target_name),
-                           config, vt, boot_snapshots[vt], root_snapshot)
+                           config, vt, boot_snapshot, root_snapshot)
         amis[vt] = ami
 
     exit()

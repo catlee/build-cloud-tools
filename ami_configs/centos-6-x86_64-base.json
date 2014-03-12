@@ -13,17 +13,17 @@
         "distro": "centos",
         "target_virtualization_types": {
             "paravirtual": {
-                "root_dev_name": "/dev/sda1",
-                "boot_dev_name": "/dev/sdb",
-                "aws_dev_name": "/dev/sdg",
-                "int_dev_name": "/dev/xvdg",
+                "boot_dev_name": "/dev/sda1",
+                "root_dev_name": "/dev/sdb",
+                "aws_dev_name": "/dev/sdk",
+                "int_dev_name": "/dev/xvdk",
                 "fs_label": "boot_dev"
             },
             "hvm": {
-                "root_dev_name": "/dev/sda1",
-                "boot_dev_name": "/dev/sdb",
-                "aws_dev_name": "/dev/sdh",
-                "int_dev_name": "/dev/xvdh",
+                "boot_dev_name": "/dev/sda1",
+                "root_dev_name": "/dev/sdb",
+                "aws_dev_name": "/dev/sdg",
+                "int_dev_name": "/dev/xvdk",
                 "fs_label": "boot_dev"
             }
         },
@@ -31,9 +31,9 @@
         "target": {
             "size": 2,
             "fs_type": "ext4",
-            "fs_label": "_/",
+            "fs_label": "root_dev",
             "aws_dev_name": "/dev/sdf",
-            "int_dev_name": "/dev/xvdf",
+            "int_dev_name": "/dev/xvdj",
             "mount_point": "/mnt/root",
             "tags": {
                 "moz-type": "bld-linux64"
