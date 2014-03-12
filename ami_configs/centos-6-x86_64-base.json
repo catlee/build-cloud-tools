@@ -15,8 +15,9 @@
             "paravirtual": {
                 "boot_dev_name": "/dev/sda1",
                 "root_dev_name": "/dev/sdb",
-                "aws_dev_name": "/dev/sdk",
-                "int_dev_name": "/dev/xvdk",
+                "aws_dev_name": "/dev/sdh",
+                "int_dev_name": "/dev/xvdl",
+                "kernel_id": "aki-499ccb20",
                 "fs_label": "boot_dev"
             },
             "hvm": {
