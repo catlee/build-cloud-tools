@@ -341,7 +341,7 @@ def create_amis(target_name, host_instance, config, keep_host_instance=False, ke
     boot_snapshots = {}
     for vt in config['target_virtualization_types']:
         log.info("Creating snapshot for %s boot volume", vt)
-        boot_snapshots[vt] = get_boot_snapshot(host_instance, config, vt, dated_target_name)
+        boot_snapshots[vt] = get_boot_snapshot(host_instance, config, vt, "boot %s-%s" % (vt, dated_target_name))
         host_instance.add_tag('%s-snapshot_id' % vt, boot_snapshots[vt].id)
 
     # Step 5: Create a snapshot of /
