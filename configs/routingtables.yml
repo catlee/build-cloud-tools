@@ -92,6 +92,14 @@ us-east-1:
 
     builders:
         routes:
+            # For amazon linux
+            176.32.96.0/21: IGW
+            207.171.160.0/19: IGW
+            72.21.192.0/19: IGW
+            205.251.192.0/18: IGW
+            54.239.0.0/17: IGW
+            54.240.0.0/12: IGW
+
             # For graphite
             carbon.hostedgraphite.com: IGW
 

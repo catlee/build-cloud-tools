@@ -48,9 +48,11 @@ def attach_volume(volume, instance, aws_dev_name, int_dev_name):
     return
 
 
-def get_volume(instance, size, aws_dev_name, int_dev_name, volume_name, instance_tag_name):
+def get_volume(instance, size, aws_dev_name, int_dev_name, volume_name, instance_tag_name=None):
     """Creates a volume `size` GB large, and attaches it to instance"""
-    volume_id = instance.tags.get(instance_tag_name)
+    volume_id = None
+    if instance_tag_name:
+        volume_id = instance.tags.get(instance_tag_name)
     if volume_id:
         v = instance.connection.get_all_volumes(volume_ids=[volume_id])[0]
     else:
@@ -91,10 +93,6 @@ def setup_chroot(config):
     run('mkdir -p {0}/dev {0}/proc {0}/etc'.format(mount_point))
     if not is_mounted("%s/proc" % mount_point):
         run('mount -t proc proc %s/proc' % mount_point)
-    if config.get('distro') in ('centos',):
-        run('which MAKEDEV >/dev/null || yum install -y MAKEDEV')
-    run('for i in console null zero ; '
-        'do /sbin/MAKEDEV -d %s/dev -x $i ; done' % mount_point)
 
 
 def install_debian(config_dir, config):
@@ -125,6 +123,9 @@ def install_centos(config_dir, config):
         put('etc/yum-local.cfg', '%s/etc/yum-local.cfg' % mount_point)
         put('groupinstall', '/tmp/groupinstall')
         put('additional_packages', '/tmp/additional_packages')
+    #run('which MAKEDEV >/dev/null || yum install -y MAKEDEV')
+    run('for i in console null zero ; '
+        'do cp -a /dev/$i {mount_point}/dev/$i ; done'.format(mount_point=mount_point))
     yum = 'yum -c {0}/etc/yum-local.cfg -y -q --installroot={0} '.format(
         mount_point)
     run('%s groupinstall "`cat /tmp/groupinstall`"' % yum)
@@ -207,23 +208,24 @@ def create_snapshot(v, name):
 
 
 def register_ami(conn, name, config, virtualization_type, boot_snapshot, root_snapshot):
-    host_img = conn.get_image(config['host_config']['ami'])
+    vt_config = config['target_virtualization_types'][virtualization_type]
+    root_dev_name = vt_config['root_dev_name']
+    boot_dev_name = vt_config['boot_dev_name']
     block_map = BlockDeviceMapping()
-    block_map[config['target_virtualization_types'][virtualization_type]['root_dev_name']] = BlockDeviceType(
-        snapshot_id=root_snapshot.id)
-    block_map[config['target_virtualization_types'][virtualization_type]['boot_dev_name']] = BlockDeviceType(
-        snapshot_id=boot_snapshot.id)
+    block_map[root_dev_name] = BlockDeviceType(snapshot_id=root_snapshot.id)
+    block_map[boot_dev_name] = BlockDeviceType(snapshot_id=boot_snapshot.id)
 
-    kernel_id = config['target_virtualization_types'][virtualization_type].get('kernel_id')
+    kernel_id = vt_config.get('kernel_id')
 
     ami_id = conn.register_image(
         name,
         '%s EBS AMI' % name,
         architecture=config['host_config']['arch'],
         kernel_id=kernel_id,
-        root_device_name=host_img.root_device_name,
         block_device_map=block_map,
         virtualization_type=virtualization_type,
+        # Tell Amazon to use the boot volume as the root device
+        root_device_name=boot_dev_name,
     )
     while True:
         try:
@@ -246,6 +248,7 @@ def patch_grub(config_dir):
     # grub-nstall doesn't handle /dev/xvd* devices properly
     log.info("patching grub-install")
     grub_install_patch = os.path.join(config_dir, "grub-install.diff")
+    run("which patch || yum install -y -q patch")
     put(grub_install_patch, "/tmp/grub-install.diff")
     run('patch -p0 -i /tmp/grub-install.diff /sbin/grub-install')
 
@@ -288,7 +291,7 @@ def setup_root_volume(instance, config, config_dir):
 def get_boot_snapshot(instance, config, vt, snapshot_name):
     vt_config = config['target_virtualization_types'][vt]
     mount_point = config['target']['mount_point']
-    bv = get_volume(instance, 1, vt_config['aws_dev_name'], vt_config['int_dev_name'], "boot-%s" % vt, "boot-%s_volume_id" % vt)
+    bv = get_volume(instance, 1, vt_config['aws_dev_name'], vt_config['int_dev_name'], "boot-%s" % vt)
     run("mkdir -p /mnt/boot-%s" % vt)
     if is_mounted("/mnt/boot-%s" % vt):
         unmount("/mnt/boot-%s" % vt)

@@ -1,7 +1,7 @@
 {
     "us-east-1": {
         "host_config": {
-            "ami": "ami-7d0c6314",
+            "ami": "ami-b7a38fde",
             "instance_type": "m3.large",
             "arch": "x86_64",
             "subnet_name": "build",
@@ -10,34 +10,34 @@
             "instance_name": "base-bld-linux64",
             "ssh_keyname": "aws-releng"
         },
+        "user": "ec2-user",
         "distro": "centos",
+        "target": {
+            "size": 2,
+            "fs_type": "ext4",
+            "fs_label": "root_dev",
+            "aws_dev_name": "/dev/sdf",
+            "int_dev_name": "/dev/xvdf",
+            "mount_point": "/mnt/root",
+            "tags": {
+                "moz-type": "bld-linux64"
+            }
+        },
         "target_virtualization_types": {
             "paravirtual": {
                 "boot_dev_name": "/dev/sda1",
                 "root_dev_name": "/dev/sdb",
-                "aws_dev_name": "/dev/sdh",
-                "int_dev_name": "/dev/xvdl",
+                "aws_dev_name": "/dev/sdg",
+                "int_dev_name": "/dev/xvdg",
                 "kernel_id": "aki-499ccb20",
                 "fs_label": "boot_dev"
             },
             "hvm": {
                 "boot_dev_name": "/dev/sda1",
                 "root_dev_name": "/dev/sdb",
-                "aws_dev_name": "/dev/sdg",
-                "int_dev_name": "/dev/xvdk",
+                "aws_dev_name": "/dev/sdh",
+                "int_dev_name": "/dev/xvdh",
                 "fs_label": "boot_dev"
-            }
-        },
-        "user": "ec2-user",
-        "target": {
-            "size": 2,
-            "fs_type": "ext4",
-            "fs_label": "root_dev",
-            "aws_dev_name": "/dev/sdf",
-            "int_dev_name": "/dev/xvdj",
-            "mount_point": "/mnt/root",
-            "tags": {
-                "moz-type": "bld-linux64"
             }
         }
     }
