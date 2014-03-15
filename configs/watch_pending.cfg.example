@@ -1,0 +1,89 @@
+{
+    "region_priorities": {
+        "us-west-2": 4,
+        "us-east-1": 5,
+        "us-west-1": 0
+    },
+    "buildermap": {
+        "Android.* (?!try)\\S+ build": "bld-linux64",
+        "Android.* try build": "try-linux64",
+        "^Linux (?!try)\\S+ (pgo-|leak test )?build": "bld-linux64",
+        "^Linux x86-64 (?!try)\\S+ (pgo-|leak test |asan |debug asan |debug static analysis )?build": "bld-linux64",
+        "^Linux.* nightly": "bld-linux64",
+        "^Linux.* valgrind": "bld-linux64",
+        "^Linux.* try.*build": "try-linux64",
+        "^b2g_(?!try)\\S+_(unagi|panda|otoro|leo|inari|hamachi|emulator|helix|leo|leo_eng)_(dep|nightly)": "bld-linux64",
+        "^b2g_try_(unagi|panda|otoro|leo|inari|hamachi|emulator)_(dep|nightly)": "try-linux64",
+        "^b2g_(?!try)\\S+_linux(32|64)_gecko(-debug)?": "bld-linux64",
+        "^b2g_try\\S+_linux(32|64)_gecko(-debug)?": "try-linux64",
+        "^Ubuntu VM 12.04 (?!x64).*": "tst-linux32",
+        "^Ubuntu VM 12.04 x64.*": "tst-linux64",
+        "^Ubuntu ASAN VM 12.04 x64.*": "tst-linux64"
+    },
+    "spot": {
+        "rules": {
+            "tst-linux64": [
+                {"instance_type": "m1.medium",
+                "performance_constant": 1,
+                "bid_price": 0.09}
+            ],
+            "tst-linux32": [
+                {"instance_type": "m1.medium",
+                 "performance_constant": 1,
+                 "bid_price": 0.09}
+            ],
+            "bld-linux64": [
+                {"instance_type": "c3.xlarge",
+                 "performance_constant": 1,
+                 "bid_price": 0.25},
+                {"instance_type": "m3.xlarge",
+                 "performance_constant": 1.1,
+                 "bid_price": 0.25},
+                {"instance_type": "m3.2xlarge",
+                 "performance_constant": 1.2,
+                 "bid_price": 0.25},
+                {"instance_type": "c3.2xlarge",
+                 "performance_constant": 1.2,
+                 "bid_price": 0.25}
+            ],
+            "try-linux64": [
+                {"instance_type": "c3.xlarge",
+                 "performance_constant": 1,
+                 "bid_price": 0.25},
+                {"instance_type": "m3.xlarge",
+                 "performance_constant": 1.1,
+                 "bid_price": 0.25},
+                {"instance_type": "m3.2xlarge",
+                 "performance_constant": 1.2,
+                 "bid_price": 0.25},
+                {"instance_type": "c3.2xlarge",
+                 "performance_constant": 1.2,
+                 "bid_price": 0.25}
+            ]
+        },
+        "limits": {
+            "us-east-1": {
+            "tst-linux64": 200,
+            "tst-linux32": 200,
+            "bld-linux64": 100,
+            "try-linux64": 200
+            },
+            "us-west-2": {
+            "tst-linux64": 200,
+            "tst-linux32": 200,
+            "bld-linux64": 100,
+            "try-linux64": 200
+            }
+        }
+    },
+    "instance_type_changes": {
+        "us-east-1": {
+            "bld-linux64": "m3.xlarge",
+            "try-linux64": "m3.xlarge"
+        },
+        "us-west-2": {
+            "bld-linux64": "m3.xlarge",
+            "try-linux64": "m3.xlarge"
+        }
+    }
+}
