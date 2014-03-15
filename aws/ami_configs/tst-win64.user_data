@@ -75,6 +75,9 @@ Log "Install MozillaBuild"
 Start-Process -Wait -FilePath "MozillaBuildSetup-Latest.exe" -ArgumentList "/S"
 Log "Done"
 
+### Append to system PATH
+[System.Environment]::SetEnvironmentVariable("PATH", $Env:Path + ";c:\mozilla-build\msys\bin;c:\mozilla-build\hg;c:\mozilla-build\vim\vim72;c:\mozilla-build\python;c:\mozilla-build\python\scripts;c:\mozilla-build\7zip;c:\mozilla-build\info-zip;c:\mozilla-build\wget", "Machine")
+
 # Grab the Debug CRT runtimes and install them
 Log "Installing Debug CRTs"
 GetFromS3 Microsoft_VC100_DebugCRT_x64.msi

@@ -12,6 +12,7 @@
         "instance_type": "m1.medium",
         "distro": "win2012",
         "user_data_file": "configs/tst-win64.user_data",
+        "use_public_ip": true,
         "device_map": {
             "/dev/sda1": {
                 "size": 30,
@@ -24,13 +25,14 @@
         "domain": "test.releng.usw2.mozilla.com",
         "dns_search_domain": "srv.releng.usw2.mozilla.com",
         "ami_desc": "Windows_Server-2012-RTM-English-64Bit-Base-2013.11.13",
-        "ami": "ami-bc64058c",
+        "ami": "ami-fc492bcc",
         "subnet_ids": ["subnet-a4cba8cd", "subnet-aecba8c7", "subnet-be89a2ca", "subnet-d6cba8bf"],
         "security_group_desc": ["default VPC security group", "windows slaves"],
         "security_group_ids": ["sg-d5617cb9", "sg-84beade6"],
         "instance_type": "m1.medium",
         "distro": "win2012",
         "user_data_file": "configs/tst-win64.user_data",
+        "use_public_ip": true,
         "device_map": {
             "/dev/sda1": {
                 "size": 30,
