@@ -247,6 +247,13 @@ Log "Installed service"
 
 Log "Done"
 
+Log "Enabling audio service"
+Set-Service -StartupType Automatic -name AudioSrv
+Set-Service -StartupType Automatic -name AudioEndpointBuilder
+# sc \\localhost config AudioSrv start= auto
+# sc \\localhost config AudioEndpointBuilder start= auto
+Log "Done"
+
 # Enable EC2Config to run at the next boot
 Log "Enabling EC2Config at next boot"
 $EC2SettingsFile="C:\Program Files\Amazon\Ec2ConfigService\Settings\Config.xml"
