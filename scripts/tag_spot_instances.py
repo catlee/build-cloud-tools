@@ -4,28 +4,58 @@ import argparse
 import logging
 import site
 import os
+from threading import Thread
+from Queue import Queue, Empty
 
 site.addsitedir(os.path.join(os.path.dirname(__file__), ".."))
-from cloudtools.aws import get_aws_connection, get_vpc, DEFAULT_REGIONS
+from cloudtools.aws import DEFAULT_REGIONS
+from cloudtools.aws.spot import get_spot_instances, get_spot_request
 
 log = logging.getLogger(__name__)
 
 
-def tag_it(i, vpc):
+def tag_it(i):
     log.debug("Tagging %s", i)
-    if not i.interfaces:
-        log.error("%s  with state '%s' has no interfaces", i, i.state)
+    req = get_spot_request(i.region.name, i.spot_instance_request_id)
+    if not req:
+        log.error("Cannot find spot request for %s", i)
         return
-    netif = i.interfaces[0]
-    # network interface needs to be reloaded usin VPC to get the tags
-    interface = vpc.get_all_network_interfaces(
-        filters={"network-interface-id": netif.id})[0]
-    # copy interface tags over
-    for tag_name, tag_value in interface.tags.iteritems():
-        log.info("Adding '%s' tag with '%s' value to %s", tag_name, tag_value,
-                 i)
-        i.add_tag(tag_name, tag_value)
-    i.add_tag("moz-state", "ready")
+    tags = {}
+    for tag_name, tag_value in req.tags.iteritems():
+        if not tag_name in i.tags:
+            log.info("Adding '%s' tag with '%s' value to %s", tag_name,
+                     tag_value, i)
+            tags[tag_name] = tag_value
+    tags["moz-state"] = "ready"
+    i.connection.create_tags([i.id], tags)
+
+
+def tagging_worker(q):
+    while True:
+        try:
+            i = q.get(timeout=0.1)
+        except Empty:
+            log.debug("Exiting worker...")
+            return
+        try:
+            tag_it(i)
+        except:
+            log.debug("Failed to tag %s", i, exc_info=True)
+
+
+def populate_queue(region, q):
+    log.debug("Getting all spot instances in %s...", region)
+    all_spot_instances = get_spot_instances(region)
+    for i in all_spot_instances:
+        name = i.tags.get('Name')
+        fqdn = i.tags.get('FQDN')
+        moz_type = i.tags.get('moz-type')
+        moz_state = i.tags.get('moz-state')
+        # If one of the tags is unset/empty
+        if not all([name, fqdn, moz_type, moz_state]):
+            log.debug("Adding %s in %s to queue", i, region)
+            q.put(i)
+    log.debug("Done with %s", region)
 
 
 if __name__ == '__main__':
@@ -34,6 +64,7 @@ if __name__ == '__main__':
                         help="optional list of regions")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="Supress logging messages")
+    parser.add_argument("-j", "--concurrency", type=int, default=8)
 
     args = parser.parse_args()
 
@@ -46,47 +77,22 @@ if __name__ == '__main__':
     if not args.regions:
         args.regions = DEFAULT_REGIONS
 
-    for region in args.regions:
-        log.info("Processing region %s", region)
-        conn = get_aws_connection(region)
-        vpc = get_vpc(region)
-        filters = {
-            'instance-lifecycle': 'spot',
-            'instance-state-name': 'running',
-        }
-        all_spot_instances = conn.get_only_instances(filters=filters)
-        for i in all_spot_instances:
-            log.info("Processing %s", i)
-            name = i.tags.get('Name')
-            fqdn = i.tags.get('FQDN')
-            moz_type = i.tags.get('moz-type')
-            # If one of the tags is unset/empty
-            if not all([name, fqdn, moz_type]):
-                tag_it(i, vpc)
+    q = Queue()
 
-        spot_requests = conn.get_all_spot_instance_requests() or []
-        for req in spot_requests:
-            if req.tags.get("moz-tagged"):
-                log.debug("Skipping already processed spot request %s", req)
-                continue
-            i_id = req.instance_id
-            if not i_id:
-                log.debug("Skipping spot request %s without instance_id", req)
-                continue
-            res = conn.get_all_instances(instance_ids=[i_id])
-            try:
-                for r in res:
-                    for i in r.instances:
-                        log.info("Processing %s", i)
-                        name = i.tags.get('Name')
-                        fqdn = i.tags.get('FQDN')
-                        moz_type = i.tags.get('moz-type')
-                        # If one of the tags is unset/empty
-                        if not all([name, fqdn, moz_type]):
-                            tag_it(i, vpc)
-            except IndexError:
-                # tag it next time
-                log.debug("Failed to tag %s", req)
-                pass
-            else:
-                req.add_tag("moz-tagged", "1")
+    threads = [Thread(target=populate_queue, args=(r, q)) for r in
+               args.regions]
+    log.debug("Waiting for regions...")
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    if not q.empty():
+        num_threads = min(args.concurrency, q.qsize())
+        threads = [Thread(target=tagging_worker, args=(q,)) for _ in
+                   range(num_threads)]
+        log.debug("Waiting for %s workers...", num_threads)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=240)

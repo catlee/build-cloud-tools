@@ -18,20 +18,31 @@ def get_users(conn=None):
 
 def make_mfa_policy(user_name):
     return json.dumps({
-        "Statement": [{
-            "Action": ["iam:CreateVirtualMFADevice",
-                       "iam:DeleteVirtualMFADevice",
-                       "iam:ListVirtualMFADevices",
-                       "iam:ResyncMFADevice",
-                       "iam:EnableMFADevice",
-                       "iam:CreateAccessKey",
-                       "iam:DeactivateMFADevice"
-                       ],
-            "Resource": ["arn:aws:iam::*:mfa/%s" % user_name,
-                         "arn:aws:iam::*:user/%s" % user_name,
-                         ],
-            "Effect": "Allow"
-        }
+        "Statement": [
+            {
+                "Action": ["iam:CreateVirtualMFADevice",
+                           "iam:DeleteVirtualMFADevice",
+                           "iam:ListVirtualMFADevices",
+                           "iam:ResyncMFADevice",
+                           "iam:EnableMFADevice",
+                           "iam:CreateAccessKey",
+                           "iam:UpdateLoginProfile",
+                           "iam:DeactivateMFADevice"
+                           ],
+                "Resource": ["arn:aws:iam::*:mfa/%s" % user_name,
+                             "arn:aws:iam::*:user/%s" % user_name,
+                             "arn:aws:iam::*:user/",
+                             "arn:aws:iam::*:mfa/",
+                             ],
+                "Effect": "Allow",
+            },
+            {
+                "Action": ["iam:ListUsers"],
+                "Resource": [
+                    "arn:aws:iam::*:user/",
+                ],
+                "Effect": "Allow",
+            },
         ]
     }, indent=2)
 

@@ -2,9 +2,9 @@
     "hostname": "buildbot-master%02d",
     "us-east-1": {
         "type": "buildbot-master",
-        "domain": "srv.releng.use1.mozilla.com",
+        "domain": "bb.releng.use1.mozilla.com",
         "ami": "ami-43c7b72a",
-        "subnet_ids": ["subnet-33a98358", "subnet-35a9835e", "subnet-0aa98361"],
+        "subnet_ids": ["subnet-5bea1b2c", "subnet-8992a1a1", "subnet-9be0f3dd"],
         "security_group_ids": ["sg-31e8185e"],
         "instance_type": "m3.medium",
         "disable_api_termination": true,
@@ -23,29 +23,15 @@
                 "skip_resize": true
             }
         },
-        "lvm": {
-            "pvcreate": "/dev/xvdf",
-            "vgcreate": {
-                "instances_storage": "/dev/xvdf"
-            },
-            "lvcreate": {
-                "builds": {
-                    "vg": "instances_storage",
-                    "params": "-l 100%FREE",
-                    "format_as": "ext4",
-                    "mount_point": "/mnt/instance_storage"
-                }
-            }
-        },
         "tags": {
             "moz-type": "buildbot-master"
         }
     },
     "us-west-2": {
         "type": "buildbot-master",
-        "domain": "srv.releng.usw2.mozilla.com",
+        "domain": "bb.releng.usw2.mozilla.com",
         "ami": "ami-516cfc61",
-        "subnet_ids": ["subnet-b948dad0", "subnet-ba48dad3", "subnet-bf48dad6"],
+        "subnet_ids": ["subnet-7c54b20b", "subnet-e77170a1", "subnet-e457b193", "subnet-c69353a3"],
         "security_group_ids": ["sg-932e33ff"],
         "instance_type": "m3.medium",
         "disable_api_termination": true,
@@ -62,20 +48,6 @@
                 "instance_dev": "/dev/xvdf",
                 "delete_on_termination": false,
                 "skip_resize": true
-            }
-        },
-        "lvm": {
-            "pvcreate": "/dev/xvdf",
-            "vgcreate": {
-                "instances_storage": "/dev/xvdf"
-            },
-            "lvcreate": {
-                "builds": {
-                    "vg": "instances_storage",
-                    "params": "-l 100%FREE",
-                    "format_as": "ext4",
-                    "mount_point": "/mnt/instance_storage"
-                }
             }
         },
         "tags": {

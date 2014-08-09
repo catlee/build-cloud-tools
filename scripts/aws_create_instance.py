@@ -9,8 +9,9 @@ import site
 import os
 import multiprocessing
 import sys
+import logging
 from random import choice
-from fabric.api import run, put, env, sudo
+from fabric.api import run, put, sudo
 from fabric.context_managers import cd
 from boto.ec2.blockdevicemapping import BlockDeviceMapping, BlockDeviceType
 from boto.ec2.networkinterface import NetworkInterfaceSpecification, \
@@ -18,15 +19,16 @@ from boto.ec2.networkinterface import NetworkInterfaceSpecification, \
 
 site.addsitedir(os.path.join(os.path.dirname(__file__), ".."))
 from cloudtools.aws import AMI_CONFIGS_DIR, get_aws_connection, get_vpc, \
-    name_available, wait_for_status
+    name_available, wait_for_status, get_user_data_tmpl
 from cloudtools.dns import get_ip, get_ptr
 from cloudtools.aws.vpc import get_subnet_id, ip_available
+from cloudtools.aws.ami import ami_cleanup, volume_to_ami, copy_ami, get_ami
+from cloudtools.fabric import setup_fabric_env
 
-import logging
 log = logging.getLogger(__name__)
 
 
-def verify(hosts, config, region):
+def verify(hosts, config, region, ignore_subnet_check=False):
     """ Check DNS entries and IP availability for hosts"""
     passed = True
     conn = get_aws_connection(region)
@@ -52,11 +54,12 @@ def verify(hosts, config, region):
             if not ip_available(conn, ip):
                 log.error("IP %s reserved for %s, but not available", ip, host)
                 passed = False
-            vpc = get_vpc(region)
-            s_id = get_subnet_id(vpc, ip)
-            if s_id not in config['subnet_ids']:
-                log.error("IP %s does not belong to assigned subnets", ip)
-                passed = False
+            if not ignore_subnet_check:
+                vpc = get_vpc(region)
+                s_id = get_subnet_id(vpc, ip)
+                if s_id not in config['subnet_ids']:
+                    log.error("IP %s does not belong to assigned subnets", ip)
+                    passed = False
     if not passed:
         raise RuntimeError("Sanity check failed")
 
@@ -65,14 +68,7 @@ def assimilate_windows(instance, config, instance_data):
     # Wait for the instance to stop, and then clear its userData and start it
     # again
     log.info("waiting for instance to shut down")
-    while True:
-        try:
-            instance.update()
-            if instance.state == 'stopped':
-                break
-        except Exception:
-            log.exception("hit error waiting for instance to stop")
-        time.sleep(10)
+    wait_for_status(instance, 'state', 'stopped', 'update')
 
     log.info("clearing userData")
     instance.modify_attribute("userData", None)
@@ -80,17 +76,11 @@ def assimilate_windows(instance, config, instance_data):
     instance.start()
     log.info("waiting for instance to start")
     # Wait for the instance to come up
-    while True:
-        try:
-            instance.update()
-            if instance.state == 'running':
-                break
-        except Exception:
-            log.exception("hit error waiting for instance to come up")
-        time.sleep(10)
+    wait_for_status(instance, 'state', 'running', 'update')
 
 
-def assimilate(instance, config, instance_data, deploypass):
+def assimilate(instance, config, ssh_key, instance_data, deploypass,
+               reboot=True):
     """Assimilate hostname into our collective
 
     What this means is that hostname will be set up with some basic things like
@@ -98,14 +88,11 @@ def assimilate(instance, config, instance_data, deploypass):
     specified in said config).
     """
     ip_addr = instance.private_ip_address
-    distro = config.get('distro')
+    distro = config.get('distro', '')
     if distro.startswith('win'):
         return assimilate_windows(instance, config, instance_data)
 
-    env.host_string = ip_addr
-    env.user = 'root'
-    env.abort_on_prompts = True
-    env.disable_known_hosts = True
+    setup_fabric_env(host_string=ip_addr, key_filename=ssh_key)
 
     # Sanity check
     run("date")
@@ -134,7 +121,7 @@ def assimilate(instance, config, instance_data, deploypass):
     if distro in ('ubuntu', 'debian'):
         put('%s/releng-public.list' % AMI_CONFIGS_DIR, '/etc/apt/sources.list')
         run("apt-get update")
-        run("apt-get install -y --allow-unauthenticated puppet")
+        run("apt-get install -y --allow-unauthenticated puppet cloud-init")
         run("apt-get clean")
     else:
         # Set up yum repos
@@ -142,10 +129,7 @@ def assimilate(instance, config, instance_data, deploypass):
         put('%s/releng-public.repo' % AMI_CONFIGS_DIR,
             '/etc/yum.repos.d/releng-public.repo')
         run('yum clean all')
-        run('yum install -q -y lvm-init puppet')
-        lvm_init_cfg = StringIO.StringIO(json.dumps(config))
-        put(lvm_init_cfg, "/etc/lvm-init/lvm-init.json")
-        run("/sbin/lvm-init")
+        run('yum install -q -y puppet cloud-init')
 
     run("wget -O /root/puppetize.sh https://hg.mozilla.org/build/puppet/raw-file/production/modules/puppet/files/puppetize.sh")
     run("chmod 755 /root/puppetize.sh")
@@ -170,26 +154,52 @@ def assimilate(instance, config, instance_data, deploypass):
              "{buildbot_master} {name} "
              "{buildslave_password}".format(**instance_data), user="cltbld")
     if instance_data.get("hg_shares"):
-        log.info("Cloning HG repos for %s...", hostname)
-        hg = "/tools/python27-mercurial/bin/hg"
-        for share, bundle in instance_data['hg_shares'].iteritems():
-            target_dir = '/builds/hg-shared/%s' % share
-            sudo('rm -rf {d} && mkdir -p {d}'.format(d=target_dir),
-                 user="cltbld")
-            sudo('{hg} init {d}'.format(hg=hg, d=target_dir), user="cltbld")
-            hgrc = "[paths]\n"
-            hgrc += "default = https://hg.mozilla.org/%s\n" % share
-            put(StringIO.StringIO(hgrc), '%s/.hg/hgrc' % target_dir)
-            run("chown cltbld: %s/.hg/hgrc" % target_dir)
-            sudo('{hg} -R {d} unbundle {b}'.format(hg=hg, d=target_dir,
-                                                   b=bundle), user="cltbld")
+        unbundle_hg(instance_data['hg_shares'])
+    if instance_data.get("s3_tarballs"):
+        unpack_tarballs(instance_data["s3_tarballs"])
 
-    log.info("Rebooting %s...", hostname)
-    run("reboot")
+    run("sync")
+    run("sync")
+    if reboot:
+        log.info("Rebooting %s...", hostname)
+        run("reboot")
 
 
-def create_instance(name, config, region, key_name, instance_data,
-                    deploypass, loaned_to, loan_bug):
+def unbundle_hg(hg_shares):
+    log.info("Cloning HG repos")
+    hg = "/tools/python27-mercurial/bin/hg"
+    for share, bundle in hg_shares.iteritems():
+        target_dir = '/builds/hg-shared/%s' % share
+        sudo('rm -rf {d} && mkdir -p {d}'.format(d=target_dir),
+             user="cltbld")
+        sudo('{hg} init {d}'.format(hg=hg, d=target_dir), user="cltbld")
+        hgrc = "[paths]\n"
+        hgrc += "default = https://hg.mozilla.org/%s\n" % share
+        put(StringIO.StringIO(hgrc), '%s/.hg/hgrc' % target_dir)
+        run("chown cltbld: %s/.hg/hgrc" % target_dir)
+        sudo('{hg} -R {d} unbundle {b}'.format(hg=hg, d=target_dir,
+                                               b=bundle), user="cltbld")
+    log.info("Cloning HG repos finished")
+
+
+def unpack_tarballs(tarballs):
+    log.info("Unpacking tarballs")
+    put("%s/s3-get" % AMI_CONFIGS_DIR, "/tmp/s3-get")
+    for dest_dir, info in tarballs.iteritems():
+        bucket, key = info["bucket"], info["key"]
+        sudo("mkdir -p {d}".format(d=dest_dir), user="cltbld")
+        with cd(dest_dir):
+            sudo("python /tmp/s3-get -b {bucket} -k {key} -o {key}".format(
+                 bucket=bucket, key=key), user="cltbld")
+            sudo("tar xf {key}".format(key=key), user="cltbld")
+            sudo("rm -f {key}".format(key=key), user="cltbld")
+    run("rm -f /tmp/s3-get")
+    log.info("Unpacking tarballs finished")
+
+
+def create_instance(name, config, region, key_name, ssh_key, instance_data,
+                    deploypass, loaned_to, loan_bug, create_ami,
+                    ignore_subnet_check, max_attempts):
     """Creates an AMI instance with the given name and config. The config must
     specify things like ami id."""
     conn = get_aws_connection(region)
@@ -228,7 +238,9 @@ def create_instance(name, config, region, key_name, instance_data,
 
     if ip_address:
         s_id = get_subnet_id(vpc, ip_address)
-        if s_id in config['subnet_ids']:
+        if ignore_subnet_check:
+            subnet_id = s_id
+        elif s_id in config['subnet_ids']:
             if ip_available(conn, ip_address):
                 subnet_id = s_id
             else:
@@ -245,10 +257,14 @@ def create_instance(name, config, region, key_name, instance_data,
     )
     interfaces = NetworkInterfaceCollection(interface)
 
-    while True:
+    keep_going, attempt = True, 1
+    while keep_going:
         try:
             if 'user_data_file' in config:
                 user_data = open(config['user_data_file']).read()
+            else:
+                user_data = get_user_data_tmpl(config['type'])
+            if user_data:
                 user_data = user_data.format(
                     puppet_server=instance_data.get('default_puppet_server'),
                     fqdn=instance_data['hostname'],
@@ -260,6 +276,10 @@ def create_instance(name, config, region, key_name, instance_data,
                     )
             else:
                 user_data = None
+                    password=deploypass,
+                    moz_instance_type=config['type'],
+                    is_spot=False
+                )
 
             reservation = conn.run_instances(
                 image_id=config['ami'],
@@ -272,12 +292,14 @@ def create_instance(name, config, region, key_name, instance_data,
                 user_data=user_data,
                 instance_profile_name=config.get('instance_profile_name'),
                 network_interfaces=interfaces,
-                instance_profile_name=config.get("instance_profile_name"),
             )
             break
         except boto.exception.BotoServerError:
             log.exception("Cannot start an instance")
         time.sleep(10)
+        if max_attempts:
+            attempt += 1
+            keep_going = max_attempts >= attempt
 
     instance = reservation.instances[0]
     log.info("instance %s created, waiting to come up", instance)
@@ -295,16 +317,46 @@ def create_instance(name, config, region, key_name, instance_data,
 
     log.info("assimilating %s", instance)
     instance.add_tag('moz-state', 'pending')
-    while True:
+
+    keep_going, attempt = True, 1
+    while keep_going:
         try:
-            assimilate(instance.private_ip_address, config, instance_data,
-                       deploypass)
+            # Don't reboot if need to create ami
+            reboot = not create_ami
+            assimilate(instance=instance, config=config, ssh_key=ssh_key,
+                       instance_data=instance_data, deploypass=deploypass,
+                       reboot=reboot)
             break
         except:
-            log.warn("problem assimilating %s (%s), retrying in 10 sec ...",
-                     instance_data['hostname'], instance.id)
+            log.warn("problem assimilating %s (%s, %s), retrying in "
+                     "10 sec ...", instance_data['hostname'], instance.id,
+                     instance.private_ip_address, exc_info=True)
             time.sleep(10)
+        if max_attempts:
+            attempt += 1
+            keep_going = max_attempts >= attempt
+
     instance.add_tag('moz-state', 'ready')
+    if create_ami:
+        ami_name = "spot-%s-%s" % (
+            config['type'], time.strftime("%Y-%m-%d-%H-%M", time.gmtime()))
+        log.info("Generating AMI %s", ami_name)
+        ami_cleanup(mount_point="/", distro=config["distro"])
+        root_bd = instance.block_device_mapping[instance.root_device_name]
+        volume = instance.connection.get_all_volumes(
+            volume_ids=[root_bd.volume_id])[0]
+        # The instance has to be stopped to flush EBS caches
+        instance.stop()
+        wait_for_status(instance, 'state', 'stopped', 'update')
+        ami = volume_to_ami(volume=volume, ami_name=ami_name,
+                            arch=instance.architecture,
+                            virtualization_type=instance.virtualization_type,
+                            kernel_id=instance.kernel,
+                            root_device_name=instance.root_device_name,
+                            tags=config["tags"])
+        log.info("AMI %s (%s) is ready", ami_name, ami.id)
+        log.warn("Terminating %s", instance)
+        instance.terminate()
 
 
 class LoggingProcess(multiprocessing.Process):
@@ -320,15 +372,18 @@ class LoggingProcess(multiprocessing.Process):
         return super(LoggingProcess, self).run()
 
 
-def make_instances(names, config, region, key_name, instance_data,
-                   deploypass, loaned_to, loan_bug):
+def make_instances(names, config, region, key_name, ssh_key, instance_data,
+                   deploypass, loaned_to, loan_bug, create_ami,
+                   ignore_subnet_check, max_attempts):
     """Create instances for each name of names for the given configuration"""
     procs = []
     for name in names:
         p = LoggingProcess(log="{name}.log".format(name=name),
                            target=create_instance,
-                           args=(name, config, region, key_name,
-                                 instance_data, deploypass, loaned_to, loan_bug),
+                           args=(name, config, region, key_name, ssh_key,
+                                 instance_data, deploypass, loaned_to,
+                                 loan_bug, create_ami, ignore_subnet_check,
+                                 max_attempts),
                            )
         p.start()
         procs.append(p)
@@ -349,9 +404,10 @@ if __name__ == '__main__':
     parser.add_argument("-k", "--secrets", type=argparse.FileType('r'),
                         required=True, help="file where secrets can be found")
     parser.add_argument("-s", "--key-name", help="SSH key name", required=True)
+    parser.add_argument("--ssh-key", required=True,
+                        help="SSH key to be used by Fabric")
     parser.add_argument("-i", "--instance-data", help="instance specific data",
                         type=argparse.FileType('r'), required=True)
-    parser.add_argument("--instance_id", help="assimilate existing instance")
     parser.add_argument("--no-verify", action="store_true",
                         help="Skip DNS related checks")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -360,7 +416,14 @@ if __name__ == '__main__':
     parser.add_argument("-b", "--bug", help="Loaner bug number")
     parser.add_argument("hosts", metavar="host", nargs="+",
                         help="hosts to be processed")
-
+    parser.add_argument("--create-ami", action="store_true",
+                        help="Generate AMI and terminate the instance")
+    parser.add_argument("--ignore-subnet-check", action="store_true",
+                        help="Do not check subnet IDs")
+    parser.add_argument("-t", "--copy-to-region", action="append", default=[],
+                        dest="copy_to_regions", help="Regions to copy AMI to")
+    parser.add_argument("--max-attempts",
+                        help="The number of attempts to try after each failure")
     args = parser.parse_args()
 
     logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
@@ -373,6 +436,8 @@ if __name__ == '__main__':
         config = json.load(args.config)[args.region]
     except KeyError:
         parser.error("unknown configuration")
+    if not os.path.exists(args.ssh_key):
+        parser.error("Cannot read %s" % args.ssh_key)
 
     secrets = json.load(args.secrets)
     deploypass = secrets["deploy_password"]
@@ -380,6 +445,17 @@ if __name__ == '__main__':
     instance_data = json.load(args.instance_data)
     if not args.no_verify:
         log.info("Sanity checking DNS entries...")
-        verify(args.hosts, config, args.region)
-    make_instances(args.hosts, config, args.region, args.key_name,
-                   instance_data, deploypass, args.loaned_to, args.bug)
+        verify(args.hosts, config, args.region, args.ignore_subnet_check)
+    make_instances(names=args.hosts, config=config, region=args.region,
+                   key_name=args.key_name, ssh_key=args.ssh_key,
+                   instance_data=instance_data, deploypass=deploypass,
+                   loaned_to=args.loaned_to, loan_bug=args.bug,
+                   create_ami=args.create_ami,
+                   ignore_subnet_check=args.ignore_subnet_check,
+                   max_attempts=args.max_attempts)
+    for r in args.copy_to_regions:
+        ami = get_ami(region=args.region,
+                      moz_instance_type=config["type"])
+        log.info("Copying %s (%s) to %s", ami.id, ami.tags.get("Name"), r)
+        new_ami = copy_ami(ami, r)
+        log.info("New AMI created. AMI ID: %s", new_ami.id)

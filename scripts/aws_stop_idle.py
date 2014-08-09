@@ -2,6 +2,7 @@
 """
 Watches running EC2 instances and shuts them down when idle
 """
+# lint_ignore=E501,C901
 import re
 import time
 import calendar
@@ -27,39 +28,39 @@ from cloudtools.aws import get_aws_connection
 
 log = logging.getLogger()
 
-# Instances runnnig less than STOP_THRESHOLD_MINS minutes within 1 hour
+# Instances running less than STOP_THRESHOLD_MINS minutes within 1 hour
 # boundary won't be stopped.
-STOP_THRESHOLD_MINS = 45
+STOP_THRESHOLD_MINS_SPOT = 45
+STOP_THRESHOLD_MINS_ONDEMAND = 30
 
 
-def stop(i, ssh_client=None):
+def stop(i):
     """Stop or destroy an instances depending on its type. Spot instances do
     not support stop() method."""
 
     name = i.tags.get("Name")
     # on-demand instances don't have instanceLifecycle attribute
     if hasattr(i, "instanceLifecycle") and i.instanceLifecycle == "spot":
-        log.info("Terminating %s (%s)", name, i)
+        log.debug("Terminating %s (%s)", name, i)
         i.terminate()
     else:
-        log.info("Stopping %s (%s)", name, i)
+        log.debug("Stopping %s (%s)", name, i)
         i.stop()
 
 
 def get_buildbot_instances(conn, moz_types):
     # Look for running `moz_types` instances with moz-state=ready
-    reservations = conn.get_all_instances(filters={
+    instances = conn.get_only_instances(filters={
         'tag:moz-state': 'ready',
         'instance-state-name': 'running',
     })
 
     retval = []
-    for r in reservations:
-        for i in r.instances:
-            name = i.tags['Name']
-            #if i.tags.get("moz-type") in moz_types:
-            if re.match("tst-w64-ec2-\d+", name):
-                retval.append(i)
+    for i in instances:
+        #if i.tags.get("moz-type") in moz_types and \
+                #not i.tags.get("moz-loaned-to"):
+        if re.match("tst-w64-ec2-\d+", name):
+            retval.append(i)
 
     return retval
 
@@ -89,8 +90,7 @@ def get_ssh_client(name, ip, credentials):
                 pass
                 #log.debug("Couldn't log into {name} at {ip} - {u} {p}".format(name=name, ip=ip, u=u, p=p), exc_info=True)
 
-    log.warning("Couldn't log into %s at %s with any known passwords",
-                name, ip)
+    log.debug("Couldn't log into %s at %s with any known passwords", name, ip)
     return None
 
 
@@ -169,6 +169,9 @@ def get_last_activity(name, client):
                 last_activity = "booting"
             else:
                 last_activity = "stopped"
+        elif "I have a leftover directory" in line:
+            # Ignore this, it doesn't indicate anything
+            continue
         elif running_command:
             # We're in the middle of running something, so say that our last
             # activity is now (0 seconds ago)
@@ -176,7 +179,8 @@ def get_last_activity(name, client):
         else:
             last_activity = slave_time - t
 
-    # If this was over 10 minutes ago
+    # If the last lines from the log are over 10 minutes ago, and are from
+    # before our reboot, then try rebooting
     if (slave_time - t) > 10 * 60 and (slave_time - t) > uptime:
         log.warning(
             "%s - shut down happened %ss ago, but we've been up for %ss - %s",
@@ -252,28 +256,37 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json,
             if time.time() - launch_time > 60 * 10:
                 stopped = True
                 if not dryrun:
-                    log.warning(
+                    log.debug(
                         "%s - shut down an instance with impaired status", name)
                     stop(i)
                 else:
-                    log.info("%s - would have stopped", name)
+                    log.debug("%s - would have stopped", name)
         return stopped
 
-    # skip instances running not close to 1hr boundary
     uptime_min = int((time.time() - launch_time) / 60)
-    if uptime_min % 60 < STOP_THRESHOLD_MINS:
-        log.debug("Skipping %s, with uptime %s", name, uptime_min)
-        return False
+    # Don't try to stop spot instances until after STOP_THRESHOLD_MINS_SPOT
+    # minutes into each hour
+    if i.spot_instance_request_id:
+        threshold = STOP_THRESHOLD_MINS_SPOT
+        if uptime_min % 60 < threshold:
+            log.debug("Skipping %s, with uptime %s", name, uptime_min)
+            return False
+    else:
+        # On demand instances can be stopped after STOP_THRESHOLD_MINS_ONDEMAND
+        threshold = STOP_THRESHOLD_MINS_ONDEMAND
+        if uptime_min < threshold:
+            log.debug("Skipping %s, with updtime %s", name, uptime_min)
+            return False
 
     last_activity = get_last_activity(name, ssh_client)
     if last_activity in ("stopped", "stuck"):
         stopped = True
         if not dryrun:
-            log.info("%s - stopping instance (launched %s)", name,
-                     i.launch_time)
-            stop(i, ssh_client)
+            log.debug("%s - stopping instance (launched %s)", name,
+                      i.launch_time)
+            stop(i)
         else:
-            log.info("%s - would have stopped", name)
+            log.debug("%s - would have stopped", name)
         return stopped
 
     if last_activity == "booting":
@@ -281,8 +294,21 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json,
         return stopped
 
     log.debug("%s - last activity %s", name, last_activity)
-    # Determine if the machine is idle for more than 10 minutes
-    if last_activity > 300:
+
+    # If it looks like we're idle for more than 8 hours, kill the machine
+    if last_activity > 8 * 3600:
+        log.warning("%s - last activity more than 8 hours ago; shutting down",
+                    name)
+        if not dryrun:
+            log.debug("%s - starting graceful shutdown", name)
+            graceful_shutdown(name, ip, ssh_client, masters_json)
+            # Stop the instance
+            log.debug("%s - stopping instance", name)
+            stop(i)
+            stopped = True
+
+    # If the machine is idle for more than 5 minutes, shut it down
+    elif last_activity > 300:
         if not dryrun:
             # Hit graceful shutdown on the master
             log.debug("%s - starting graceful shutdown", name)
@@ -291,13 +317,13 @@ def aws_safe_stop_instance(i, impaired_ids, credentials, masters_json,
             # Check if we've exited right away
             if get_last_activity(name, ssh_client) == "stopped":
                 log.debug("%s - stopping instance", name)
-                stop(i, ssh_client)
+                stop(i)
                 stopped = True
             else:
-                log.info(
+                log.debug(
                     "%s - not stopping, waiting for graceful shutdown", name)
         else:
-            log.info("%s - would have started graceful shutdown", name)
+            log.debug("%s - would have started graceful shutdown", name)
             stopped = True
     else:
         log.debug("%s - not stopping", name)

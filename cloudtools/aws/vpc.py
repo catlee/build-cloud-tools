@@ -1,4 +1,8 @@
+import logging
 from IPy import IP
+from . import get_vpc
+
+log = logging.getLogger(__name__)
 
 
 def get_subnet_id(vpc, ip):
@@ -19,3 +23,16 @@ def ip_available(conn, ip):
         return False
     else:
         return True
+
+
+def get_avail_subnet(region, subnet_ids, availability_zone):
+    vpc = get_vpc(region)
+    subnets = vpc.get_all_subnets(subnet_ids=subnet_ids)
+    subnets = [s for s in subnets if s.available_ip_address_count > 0 and
+               s.availability_zone == availability_zone]
+    subnets.sort(key=lambda s: s.available_ip_address_count)
+    if not subnets:
+        log.debug("No free IP available in %s for subnets %s",
+                  availability_zone, subnet_ids)
+        return None
+    return subnets[-1].id
