@@ -36,7 +36,7 @@ def create_instance(connection, instance_name, config, key_name):
         log.debug("reading user_data from '%s'" % config['user_data_file'])
         user_data = open(config['user_data_file']).read()
         # assert that there are no values in need of formatting
-        user_data = user_data.format()
+        user_data = user_data.format(password='password123!')
     else:
         user_data = None
 

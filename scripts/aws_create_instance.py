@@ -273,10 +273,6 @@ def create_instance(name, config, region, key_name, ssh_key, instance_data,
                     dns_search_domain=config.get('dns_search_domain'),
                     # TODO: Use a real password!
                     password="password123!",
-                    )
-            else:
-                user_data = None
-                    password=deploypass,
                     moz_instance_type=config['type'],
                     is_spot=False
                 )
@@ -288,7 +284,7 @@ def create_instance(name, config, region, key_name, ssh_key, instance_data,
                 block_device_map=bdm,
                 client_token=token,
                 disable_api_termination=bool(config.get('disable_api_termination')),
-                security_group_ids=config.get('security_group_ids', []),
+                #security_group_ids=config.get('security_group_ids', []),
                 user_data=user_data,
                 instance_profile_name=config.get('instance_profile_name'),
                 network_interfaces=interfaces,
